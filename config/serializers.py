@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from academics.models import ClassGradebook, SchoolClass, Student, Subject, SubjectGrade
+from academics.models import ClassGradebook, Grade, SchoolClass, Student, StudentDocument, Subject, SubjectGrade
 from assignments.models import Homework, HomeworkSubmission, Quiz, QuizQuestion, QuizSubmission
 from content.models import (
     Accreditation,
@@ -12,7 +12,7 @@ from content.models import (
     SchoolStat,
     SchoolValue,
 )
-from finance.models import PaymentNotice, PaymentStatus, StudentFeeBalance
+from finance.models import FeeInstallment, FeePlan, PaymentNotice, PaymentStatus, StudentFeeBalance
 from staff.models import TeacherClassAssignment, TeacherProfile
 from accounts.models import User
 from accounts.utils import create_auto_user, next_numeric_username
@@ -21,10 +21,26 @@ from accounts.utils import create_auto_user, next_numeric_username
 class SchoolClassSerializer(serializers.ModelSerializer):
     gradeLevel = serializers.CharField(source="grade_level", read_only=True)
     studentCount = serializers.IntegerField(source="student_count", read_only=True)
+    homeroomTeacherId = serializers.SerializerMethodField()
+    homeroomTeacherName = serializers.SerializerMethodField()
 
     class Meta:
         model = SchoolClass
-        fields = ["id", "name", "gradeLevel", "section", "studentCount"]
+        fields = [
+            "id",
+            "name",
+            "gradeLevel",
+            "section",
+            "studentCount",
+            "homeroomTeacherId",
+            "homeroomTeacherName",
+        ]
+
+    def get_homeroomTeacherId(self, obj):
+        return str(obj.homeroom_teacher_id) if obj.homeroom_teacher_id else None
+
+    def get_homeroomTeacherName(self, obj):
+        return obj.homeroom_teacher.name if obj.homeroom_teacher_id else None
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -63,6 +79,26 @@ class SchoolClassWriteSerializer(serializers.ModelSerializer):
         return SchoolClassSerializer(instance).data
 
 
+class GradeSerializer(serializers.ModelSerializer):
+    sectionsCount = serializers.IntegerField(source="sections_count")
+
+    class Meta:
+        model = Grade
+        fields = ["id", "name", "sectionsCount"]
+
+    def validate_sectionsCount(self, value):
+        if value < 1:
+            raise serializers.ValidationError("عدد الشعب يجب أن يكون 1 على الأقل")
+        if value > 20:
+            raise serializers.ValidationError("عدد الشعب كبير جداً")
+        return value
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["id"] = str(data["id"])
+        return data
+
+
 class SubjectSerializer(serializers.ModelSerializer):
     teacherCount = serializers.SerializerMethodField()
 
@@ -80,7 +116,8 @@ class SubjectSerializer(serializers.ModelSerializer):
 
 
 class StudentSerializer(serializers.ModelSerializer):
-    grade = serializers.CharField(source="grade_level")
+    grade = serializers.CharField(source="grade_level", required=False)
+    section = serializers.CharField(required=False)
     studentNumber = serializers.CharField(source="student_number", required=False)
     classId = serializers.PrimaryKeyRelatedField(
         source="school_class", queryset=SchoolClass.objects.all(), allow_null=True, required=False
@@ -90,6 +127,8 @@ class StudentSerializer(serializers.ModelSerializer):
     paymentStatus = serializers.SerializerMethodField()
     feesPaid = serializers.SerializerMethodField()
     balance = serializers.SerializerMethodField()
+
+    documents = serializers.SerializerMethodField()
 
     class Meta:
         model = Student
@@ -115,6 +154,21 @@ class StudentSerializer(serializers.ModelSerializer):
 
     def get_generatedPassword(self, obj):
         return getattr(obj, "_generated_password", None)
+
+    def get_documents(self, obj):
+        docs = obj.uploaded_documents.all()
+        if docs.exists():
+            request = self.context.get("request")
+            result = []
+            for d in docs:
+                url = d.file.url if d.file else None
+                if url and request:
+                    url = request.build_absolute_uri(url)
+                result.append({"id": str(d.id), "name": d.name, "url": url})
+            return result
+        # Fallback to legacy JSON strings
+        legacy = obj.documents or []
+        return [{"id": None, "name": str(x), "url": None} for x in legacy]
 
     def validate(self, attrs):
         school_class = attrs.get("school_class")
@@ -146,8 +200,11 @@ class StudentSerializer(serializers.ModelSerializer):
         if latest:
             return latest.status
         if hasattr(obj, "fee_balance"):
+            # If the student hasn't submitted any payment notice yet, mark as unpaid.
+            if float(obj.fee_balance.paid or 0) <= 0:
+                return "unpaid"
             return PaymentStatus.APPROVED if obj.fee_balance.fees_paid else PaymentStatus.PENDING
-        return PaymentStatus.PENDING
+        return "unpaid"
 
     def get_feesPaid(self, obj):
         if hasattr(obj, "fee_balance"):
@@ -478,14 +535,24 @@ class QuizSubmissionSerializer(serializers.ModelSerializer):
 
 class PaymentNoticeSerializer(serializers.ModelSerializer):
     studentName = serializers.CharField(source="student.name", read_only=True)
+    declaredAmount = serializers.DecimalField(source="declared_amount", max_digits=10, decimal_places=2, read_only=True)
+    receiptUrl = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentNotice
-        fields = ["id", "studentName", "amount", "date", "status", "note"]
+        fields = ["id", "studentName", "declaredAmount", "amount", "date", "status", "note", "receiptUrl"]
+
+    def get_receiptUrl(self, obj):
+        if not obj.receipt:
+            return None
+        request = self.context.get("request")
+        url = obj.receipt.url
+        return request.build_absolute_uri(url) if request else url
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
         data["id"] = str(data["id"])
+        data["declaredAmount"] = float(data["declaredAmount"])
         data["amount"] = float(data["amount"])
         data["date"] = str(data["date"])
         return data
@@ -493,31 +560,159 @@ class PaymentNoticeSerializer(serializers.ModelSerializer):
 
 class FinanceNoticeSerializer(serializers.Serializer):
     id = serializers.CharField()
+    studentId = serializers.CharField()
     studentName = serializers.CharField()
+    declaredAmount = serializers.FloatField()
     amount = serializers.FloatField()
     status = serializers.CharField()
     date = serializers.CharField()
+    note = serializers.CharField(allow_blank=True, required=False)
+    receiptUrl = serializers.CharField(allow_null=True, required=False)
+
+
+class FeeInstallmentSerializer(serializers.ModelSerializer):
+    startDate = serializers.DateField(source="start_date", allow_null=True, required=False)
+    endDate = serializers.DateField(source="end_date", allow_null=True, required=False)
+
+    class Meta:
+        model = FeeInstallment
+        fields = ["id", "order", "amount", "startDate", "endDate"]
+        read_only_fields = ["id"]
+
+    def to_internal_value(self, data):
+        # Convert empty strings to None so DateField doesn't reject them
+        mutable = dict(data)
+        if mutable.get("startDate") == "":
+            mutable["startDate"] = None
+        if mutable.get("endDate") == "":
+            mutable["endDate"] = None
+        return super().to_internal_value(mutable)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if data.get("id") is not None:
+            data["id"] = str(data["id"])
+        data["amount"] = float(data["amount"])
+        data["startDate"] = str(data["startDate"]) if data["startDate"] else None
+        data["endDate"] = str(data["endDate"]) if data["endDate"] else None
+        return data
+
+
+class FeePlanSerializer(serializers.ModelSerializer):
+    gradeIds = serializers.PrimaryKeyRelatedField(source="grades", queryset=Grade.objects.all(), many=True)
+    installmentsCount = serializers.IntegerField(source="installments_count")
+    totalAmount = serializers.DecimalField(source="total_amount", max_digits=10, decimal_places=2)
+    isActive = serializers.BooleanField(source="is_active", required=False, default=True)
+    gradeNames = serializers.SerializerMethodField()
+    installments = FeeInstallmentSerializer(many=True)
+
+    class Meta:
+        model = FeePlan
+        fields = [
+            "id",
+            "name",
+            "totalAmount",
+            "installmentsCount",
+            "isActive",
+            "gradeIds",
+            "gradeNames",
+            "installments",
+        ]
+
+    def get_gradeNames(self, obj):
+        return list(obj.grades.values_list("name", flat=True))
+
+    def _save_installments(self, plan, installments_data):
+        plan.installments.all().delete()
+        for row in installments_data:
+            FeeInstallment.objects.create(
+                fee_plan=plan,
+                order=row["order"],
+                amount=row["amount"],
+                start_date=row.get("start_date") or None,
+                end_date=row.get("end_date") or None,
+            )
+
+    def create(self, validated_data):
+        installments_data = validated_data.pop("installments", [])
+        grades = validated_data.pop("grades", [])
+        plan = FeePlan.objects.create(**validated_data)
+        if grades:
+            plan.grades.set(grades)
+        self._save_installments(plan, installments_data)
+        return plan
+
+    def update(self, instance, validated_data):
+        installments_data = validated_data.pop("installments", None)
+        grades = validated_data.pop("grades", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if grades is not None:
+            instance.grades.set(grades)
+        if installments_data is not None:
+            self._save_installments(instance, installments_data)
+        return instance
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["id"] = str(data["id"])
+        data["totalAmount"] = float(data["totalAmount"])
+        data["gradeIds"] = [str(gid) for gid in data["gradeIds"]]
+        return data
 
 
 class NewsItemSerializer(serializers.ModelSerializer):
     imageUrl = serializers.SerializerMethodField()
+    images = serializers.SerializerMethodField()
 
     class Meta:
         model = NewsItem
         fields = [
             "id", "title", "description", "body", "date", "category",
-            "gradient", "featured", "image", "imageUrl",
+            "gradient", "featured", "image", "imageUrl", "images",
         ]
         extra_kwargs = {"image": {"write_only": True}}
 
-    def get_imageUrl(self, obj):
-        if not obj.image:
-            return None
-        request = self.context.get("request")
-        url = obj.image.url
-        if request:
+    def _absolute_url(self, request, url):
+        if request and url:
             return request.build_absolute_uri(url)
         return url
+
+    def _serialize_image(self, request, image_obj):
+        if not image_obj or not image_obj.file:
+            return None
+        return {
+            "id": str(image_obj.id),
+            "url": self._absolute_url(request, image_obj.file.url),
+            "isCover": bool(image_obj.is_cover),
+        }
+
+    def get_images(self, obj):
+        request = self.context.get("request")
+        gallery = list(obj.images.all())
+        if gallery:
+            return [
+                serialized
+                for image in gallery
+                if image.file and (serialized := self._serialize_image(request, image))
+            ]
+        if obj.image:
+            return [{
+                "id": None,
+                "url": self._absolute_url(request, obj.image.url),
+                "isCover": True,
+            }]
+        return []
+
+    def get_imageUrl(self, obj):
+        request = self.context.get("request")
+        cover = obj.images.filter(is_cover=True).first() or obj.images.order_by("order", "id").first()
+        if cover and cover.file:
+            return self._absolute_url(request, cover.file.url)
+        if obj.image:
+            return self._absolute_url(request, obj.image.url)
+        return None
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

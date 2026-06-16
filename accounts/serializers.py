@@ -24,6 +24,7 @@ class UserSerializer(serializers.ModelSerializer):
 class UserCreateSerializer(serializers.ModelSerializer):
     name = serializers.CharField(write_only=True)
     username = serializers.CharField(required=False)
+    email = serializers.EmailField(required=False, allow_blank=True)
     password = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     class Meta:
@@ -61,7 +62,9 @@ class UserCreateSerializer(serializers.ModelSerializer):
         password = validated_data.pop("password", "")
         if not password:
             raise serializers.ValidationError({"password": "كلمة المرور مطلوبة"})
-        email = validated_data.pop("email").lower()
+        email = (validated_data.pop("email", None) or "").strip().lower()
+        if not email:
+            email = f"{username}@school.local"
         user = User.objects.create_user(
             username=username,
             email=email,

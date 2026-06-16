@@ -2,10 +2,31 @@ from django.conf import settings
 from django.db import models
 
 
+class Grade(models.Model):
+    name = models.CharField(max_length=50, unique=True)
+    sections_count = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "فصل دراسي"
+        verbose_name_plural = "الفصول الدراسية"
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
 class SchoolClass(models.Model):
     name = models.CharField(max_length=100)
     grade_level = models.CharField(max_length=50, blank=True)
     section = models.CharField(max_length=10, blank=True)
+    homeroom_teacher = models.ForeignKey(
+        "staff.TeacherProfile",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="homeroom_classes",
+    )
 
     class Meta:
         verbose_name = "صف"
@@ -62,6 +83,21 @@ class Student(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class StudentDocument(models.Model):
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name="uploaded_documents")
+    name = models.CharField(max_length=200)
+    file = models.FileField(upload_to="students/documents/")
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "وثيقة طالب"
+        verbose_name_plural = "وثائق الطلاب"
+        ordering = ["-uploaded_at"]
+
+    def __str__(self):
+        return f"{self.student_id}: {self.name}"
 
 
 class Enrollment(models.Model):

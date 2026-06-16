@@ -5,7 +5,20 @@ from rest_framework.routers import DefaultRouter
 
 from config.api_views import (
     AdminAnalyticsView,
+    AdminAnalyticsDetailsView,
+    AdminAdmissionApplicationsView,
+    AdminApproveAdmissionView,
+    AdminArchiveContactMessageView,
+    AdminBlockedStudentsView,
+    AdminContactMessagesView,
+    AdminInactiveStudentsView,
+    AdminSiteSettingsView,
+    PublicSiteSettingsView,
+    PublicAdmissionApplicationView,
+    PublicContactMessageView,
     AdminClassViewSet,
+    AdminFeePlanViewSet,
+    AdminGradeViewSet,
     AdminFinanceViewSet,
     AdminNewsViewSet,
     AdminStudentViewSet,
@@ -44,9 +57,11 @@ router.register("content/policies", PublicPolicyViewSet, basename="public-polici
 router.register("content/accreditations", PublicAccreditationViewSet, basename="public-accreditations")
 router.register("staff/teachers", PublicTeachersViewSet, basename="public-teachers")
 router.register("admin/students", AdminStudentViewSet, basename="admin-students")
+router.register("admin/grades", AdminGradeViewSet, basename="admin-grades")
 router.register("admin/classes", AdminClassViewSet, basename="admin-classes")
 router.register("admin/subjects", AdminSubjectViewSet, basename="admin-subjects")
 router.register("admin/teachers", AdminTeacherViewSet, basename="admin-teachers")
+router.register("admin/finance/plans", AdminFeePlanViewSet, basename="admin-finance-plans")
 router.register("admin/finance/payments", AdminFinanceViewSet, basename="admin-finance")
 router.register("admin/content/news", AdminNewsViewSet, basename="admin-news")
 router.register("teacher/homework", TeacherHomeworkViewSet, basename="teacher-homework")
@@ -58,6 +73,17 @@ urlpatterns = [
     path("api/content/values/", PublicSchoolValuesView.as_view()),
     path("api/content/stats/", PublicStatsView.as_view()),
     path("api/admin/analytics/", AdminAnalyticsView.as_view()),
+    path("api/admin/analytics/details/", AdminAnalyticsDetailsView.as_view()),
+    path("api/site-settings/", PublicSiteSettingsView.as_view()),
+    path("api/admin/site-settings/", AdminSiteSettingsView.as_view()),
+    path("api/admissions/", PublicAdmissionApplicationView.as_view()),
+    path("api/contact/messages/", PublicContactMessageView.as_view()),
+    path("api/admin/admissions/", AdminAdmissionApplicationsView.as_view()),
+    path("api/admin/admissions/<str:app_id>/approve/", AdminApproveAdmissionView.as_view()),
+    path("api/admin/messages/", AdminContactMessagesView.as_view()),
+    path("api/admin/messages/<str:message_id>/archive/", AdminArchiveContactMessageView.as_view()),
+    path("api/admin/notifications/blocked-students/", AdminBlockedStudentsView.as_view()),
+    path("api/admin/notifications/inactive-students/", AdminInactiveStudentsView.as_view()),
     path("api/teacher/profile/", TeacherProfileView.as_view()),
     path("api/teacher/classes/", TeacherClassesView.as_view()),
     path("api/teacher/classes/<int:class_id>/", TeacherClassDetailView.as_view()),

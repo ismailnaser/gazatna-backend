@@ -30,6 +30,29 @@ class TeacherProfile(models.Model):
     def __str__(self):
         return self.name
 
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if not self.image:
+            return
+        try:
+            from PIL import Image
+        except Exception:
+            return
+        try:
+            img_path = self.image.path
+            with Image.open(img_path) as im:
+                im = im.convert("RGB")
+                w, h = im.size
+                side = min(w, h)
+                left = (w - side) // 2
+                top = (h - side) // 2
+                im = im.crop((left, top, left + side, top + side))
+                im = im.resize((512, 512), Image.Resampling.LANCZOS)
+                im.save(img_path, quality=88, optimize=True)
+        except Exception:
+            # If processing fails, keep original upload.
+            return
+
 
 class TeacherClassAssignment(models.Model):
     teacher = models.ForeignKey(TeacherProfile, on_delete=models.CASCADE, related_name="class_assignments")
