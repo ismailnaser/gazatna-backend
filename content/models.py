@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 
 
@@ -199,6 +200,14 @@ class AdmissionApplication(models.Model):
         blank=True,
         related_name="admission_source",
     )
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_admissions",
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-created_at", "-id"]
@@ -213,7 +222,8 @@ class MessageStatus(models.TextChoices):
 
 class ContactMessage(models.Model):
     name = models.CharField(max_length=200)
-    email = models.EmailField()
+    email = models.EmailField(blank=True, default="")
+    phone = models.CharField(max_length=50, blank=True, default="")
     message = models.TextField()
     status = models.CharField(max_length=20, choices=MessageStatus.choices, default=MessageStatus.NEW)
     created_at = models.DateTimeField(auto_now_add=True)

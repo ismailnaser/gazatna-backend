@@ -62,3 +62,22 @@ class TeacherClassAssignment(models.Model):
         unique_together = [("teacher", "school_class")]
         verbose_name = "تعيين معلم لصف"
         verbose_name_plural = "تعيينات المعلمين"
+
+
+class TeacherReadAlert(models.Model):
+    teacher = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="read_teacher_alerts",
+    )
+    alert_key = models.CharField(max_length=80)
+    read_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [("teacher", "alert_key")]
+        verbose_name = "إشعار معلم مفتوح"
+        verbose_name_plural = "إشعارات المعلم المفتوحة"
+        ordering = ["-read_at"]
+
+    def __str__(self):
+        return f"{self.teacher_id}: {self.alert_key}"

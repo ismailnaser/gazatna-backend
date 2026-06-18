@@ -110,12 +110,12 @@ def find_blocking_installment(installments, paid, today):
             continue
 
         has_dates = bool(inst.start_date and inst.end_date)
-        if inst.order == 1:
-            if not has_dates or today >= inst.start_date:
+        if not has_dates:
+            if inst.order == 1:
                 return inst, remaining
             continue
 
-        if has_dates and today > inst.end_date:
+        if today >= inst.start_date:
             return inst, remaining
 
     return None, Decimal("0")
@@ -273,10 +273,17 @@ def build_fee_status(student):
                 f"وليس المبلغ الكلي ({int(total)} ₪)."
             )
         else:
-            message = (
-                f"يجب دفع مبلغ الدفعة رقم {blocking.order} ({int(remaining)} ₪) لاستئناف الوصول — "
-                f"المطلوب لهذه الدفعة: {int(blocking.amount)} ₪ (انتهى الموعد: {blocking.end_date})."
-            )
+            if blocking.start_date and blocking.end_date and today <= blocking.end_date:
+                message = (
+                    f"يجب دفع مبلغ الدفعة رقم {blocking.order} ({int(remaining)} ₪) لاستئناف الوصول — "
+                    f"المطلوب لهذه الدفعة: {int(blocking.amount)} ₪ "
+                    f"(من {blocking.start_date} إلى {blocking.end_date})."
+                )
+            else:
+                message = (
+                    f"يجب دفع مبلغ الدفعة رقم {blocking.order} ({int(remaining)} ₪) لاستئناف الوصول — "
+                    f"المطلوب لهذه الدفعة: {int(blocking.amount)} ₪ (انتهى الموعد: {blocking.end_date})."
+                )
         return {
             "blocked": True,
             "fullyPaid": False,

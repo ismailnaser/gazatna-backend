@@ -5,12 +5,13 @@ from django.db import models
 class Grade(models.Model):
     name = models.CharField(max_length=50, unique=True)
     sections_count = models.PositiveIntegerField(default=1)
+    sort_order = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         verbose_name = "فصل دراسي"
         verbose_name_plural = "الفصول الدراسية"
-        ordering = ["name"]
+        ordering = ["sort_order", "name"]
 
     def __str__(self):
         return self.name
@@ -142,3 +143,22 @@ class ClassGradebook(models.Model):
         unique_together = [("student", "school_class")]
         verbose_name = "سجل درجات الصف"
         verbose_name_plural = "سجلات درجات الصفوف"
+
+
+class ParentDismissedAlert(models.Model):
+    parent = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="dismissed_alerts",
+    )
+    alert_id = models.CharField(max_length=64)
+    dismissed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [("parent", "alert_id")]
+        verbose_name = "إشعار مخفي لولي الأمر"
+        verbose_name_plural = "إشعارات مخفية لأولياء الأمور"
+        ordering = ["-dismissed_at"]
+
+    def __str__(self):
+        return f"{self.parent_id}: {self.alert_id}"

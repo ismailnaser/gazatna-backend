@@ -8,6 +8,11 @@ class PaymentStatus(models.TextChoices):
     REJECTED = "rejected", "مرفوض"
 
 
+class PaymentSource(models.TextChoices):
+    PARENT = "parent", "من المنصة"
+    MANUAL = "manual", "يدوي"
+
+
 class FeePlan(models.Model):
     name = models.CharField(max_length=120)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
@@ -69,6 +74,7 @@ class PaymentNotice(models.Model):
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     date = models.DateField()
     status = models.CharField(max_length=20, choices=PaymentStatus.choices, default=PaymentStatus.PENDING)
+    source = models.CharField(max_length=20, choices=PaymentSource.choices, default=PaymentSource.PARENT)
     note = models.TextField(blank=True)
     receipt = models.ImageField(upload_to="payments/", blank=True, null=True)
     reviewed_by = models.ForeignKey(

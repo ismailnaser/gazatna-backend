@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 from academics.models import ClassGradebook, Grade, SchoolClass, Student, StudentDocument, Subject, SubjectGrade
-from assignments.models import Homework, HomeworkSubmission, Quiz, QuizQuestion, QuizSubmission
+from assignments.models import Homework, HomeworkSubmission, QuestionType, Quiz, QuizQuestion, QuizSubmission, SubjectAnnouncement, SubjectMaterial
 from content.models import (
     Accreditation,
     Activity,
@@ -81,10 +81,11 @@ class SchoolClassWriteSerializer(serializers.ModelSerializer):
 
 class GradeSerializer(serializers.ModelSerializer):
     sectionsCount = serializers.IntegerField(source="sections_count")
+    sortOrder = serializers.IntegerField(source="sort_order", read_only=True)
 
     class Meta:
         model = Grade
-        fields = ["id", "name", "sectionsCount"]
+        fields = ["id", "name", "sectionsCount", "sortOrder"]
 
     def validate_sectionsCount(self, value):
         if value < 1:
@@ -328,7 +329,9 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
         return getattr(obj, "_generated_password", None)
 
     def get_classIds(self, obj):
-        return [str(a.school_class_id) for a in obj.class_assignments.select_related("school_class")]
+        assigned = {a.school_class_id for a in obj.class_assignments.select_related("school_class")}
+        homeroom = set(obj.homeroom_classes.values_list("id", flat=True))
+        return [str(cid) for cid in sorted(assigned | homeroom)]
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -421,15 +424,46 @@ class TeacherWriteSerializer(serializers.ModelSerializer):
 
 
 class QuizQuestionSerializer(serializers.ModelSerializer):
-    correctIndex = serializers.IntegerField(source="correct_index")
+    questionType = serializers.ChoiceField(
+        source="question_type",
+        choices=QuestionType.choices,
+        required=False,
+        default=QuestionType.CHOICE,
+    )
+    correctIndex = serializers.IntegerField(source="correct_index", required=False, allow_null=True)
+    correctText = serializers.CharField(source="correct_text", required=False, allow_blank=True)
+    points = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, default=1)
 
     class Meta:
         model = QuizQuestion
-        fields = ["id", "prompt", "options", "correctIndex", "order"]
+        fields = [
+            "id",
+            "prompt",
+            "questionType",
+            "options",
+            "correctIndex",
+            "correctText",
+            "pairs",
+            "points",
+            "order",
+        ]
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
         data["id"] = str(data["id"])
+        if data.get("points") is not None:
+            data["points"] = float(data["points"])
+        if self.context.get("hide_quiz_answers"):
+            data.pop("correctIndex", None)
+            data.pop("correctText", None)
+            if data.get("questionType") == "matching":
+                pairs = data.get("pairs") or []
+                rights = [p.get("right") for p in pairs if p.get("right")]
+                import random
+
+                random.shuffle(rights)
+                data["options"] = rights
+                data["pairs"] = [{"left": p.get("left", "")} for p in pairs]
         return data
 
 
@@ -439,17 +473,91 @@ class HomeworkSerializer(serializers.ModelSerializer):
         source="teacher", queryset=TeacherProfile.objects.all(), required=False
     )
     dueDate = serializers.DateField(source="due_date", format="%Y-%m-%d")
+    startAt = serializers.DateTimeField(source="start_at", required=False, allow_null=True)
+    endAt = serializers.DateTimeField(source="end_at", required=False, allow_null=True)
+    gradesVisible = serializers.BooleanField(source="grades_visible", required=False)
+    maxScore = serializers.DecimalField(source="max_score", max_digits=5, decimal_places=2, required=False)
+    attachments = serializers.SerializerMethodField()
+    attachmentUrl = serializers.SerializerMethodField()
+    attachmentName = serializers.SerializerMethodField()
+    className = serializers.CharField(source="school_class.name", read_only=True)
+    teacherName = serializers.CharField(source="teacher.name", read_only=True)
+    windowStatus = serializers.SerializerMethodField()
+    submissionCount = serializers.SerializerMethodField()
+    groupId = serializers.UUIDField(source="group_id", read_only=True)
     createdAt = serializers.DateTimeField(source="created_at", format="%Y-%m-%d", read_only=True)
 
     class Meta:
         model = Homework
-        fields = ["id", "classId", "teacherId", "title", "description", "dueDate", "status", "createdAt"]
+        fields = [
+            "id",
+            "groupId",
+            "classId",
+            "teacherId",
+            "subject",
+            "title",
+            "description",
+            "dueDate",
+            "startAt",
+            "endAt",
+            "gradesVisible",
+            "maxScore",
+            "attachments",
+            "attachmentUrl",
+            "attachmentName",
+            "className",
+            "teacherName",
+            "windowStatus",
+            "submissionCount",
+            "status",
+            "createdAt",
+        ]
+
+    def get_attachments(self, obj):
+        from assignments.attachment_utils import homework_attachments_payload
+
+        return homework_attachments_payload(obj, self.context.get("request"))
+
+    def get_attachmentUrl(self, obj):
+        first = obj.attachment_files.first()
+        if first:
+            request = self.context.get("request")
+            url = first.file.url
+            return request.build_absolute_uri(url) if request else url
+        if not obj.attachment:
+            return None
+        request = self.context.get("request")
+        url = obj.attachment.url
+        return request.build_absolute_uri(url) if request else url
+
+    def get_attachmentName(self, obj):
+        first = obj.attachment_files.first()
+        if first:
+            return first.original_name or first.file.name.split("/")[-1]
+        if not obj.attachment:
+            return None
+        return obj.attachment.name.split("/")[-1]
+
+    def get_windowStatus(self, obj):
+        from assignments.services import homework_window_status
+
+        return homework_window_status(obj)
+
+    def get_submissionCount(self, obj):
+        return obj.submissions.count()
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
         data["id"] = str(data["id"])
+        data["groupId"] = str(data.get("groupId") or data["id"])
         data["classId"] = str(data["classId"])
         data["teacherId"] = str(data["teacherId"])
+        if data.get("startAt"):
+            data["startAt"] = str(data["startAt"])
+        if data.get("endAt"):
+            data["endAt"] = str(data["endAt"])
+        if data.get("maxScore") is not None:
+            data["maxScore"] = float(data["maxScore"])
         return data
 
 
@@ -457,16 +565,64 @@ class HomeworkSubmissionSerializer(serializers.ModelSerializer):
     homeworkId = serializers.PrimaryKeyRelatedField(source="homework", queryset=Homework.objects.all())
     studentId = serializers.PrimaryKeyRelatedField(source="student", queryset=Student.objects.all())
     submittedAt = serializers.DateTimeField(source="submitted_at", read_only=True)
+    gradedAt = serializers.DateTimeField(source="graded_at", read_only=True, allow_null=True)
+    maxScore = serializers.DecimalField(source="max_score", max_digits=5, decimal_places=2, required=False)
+    teacherNote = serializers.CharField(source="teacher_note", required=False, allow_blank=True)
+    attachmentUrl = serializers.SerializerMethodField()
+    attachmentName = serializers.SerializerMethodField()
+    studentName = serializers.CharField(source="student.name", read_only=True)
+    homeworkTitle = serializers.CharField(source="homework.title", read_only=True)
+    homeworkSubject = serializers.CharField(source="homework.subject", read_only=True)
+    className = serializers.CharField(source="homework.school_class.name", read_only=True)
+    gradesVisible = serializers.BooleanField(source="homework.grades_visible", read_only=True)
 
     class Meta:
         model = HomeworkSubmission
-        fields = ["id", "homeworkId", "studentId", "content", "submittedAt"]
+        fields = [
+            "id",
+            "homeworkId",
+            "studentId",
+            "studentName",
+            "homeworkTitle",
+            "homeworkSubject",
+            "className",
+            "content",
+            "attachmentUrl",
+            "attachmentName",
+            "score",
+            "maxScore",
+            "teacherNote",
+            "gradesVisible",
+            "submittedAt",
+            "gradedAt",
+        ]
+
+    def get_attachmentUrl(self, obj):
+        if not obj.attachment:
+            return None
+        request = self.context.get("request")
+        url = obj.attachment.url
+        return request.build_absolute_uri(url) if request else url
+
+    def get_attachmentName(self, obj):
+        if not obj.attachment:
+            return None
+        return obj.attachment.name.split("/")[-1]
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
         data["id"] = str(data["id"])
         data["homeworkId"] = str(data["homeworkId"])
         data["studentId"] = str(data["studentId"])
+        if data.get("score") is not None:
+            data["score"] = float(data["score"])
+        data["maxScore"] = float(instance.homework.max_score)
+        if not data.get("gradesVisible"):
+            hide = self.context.get("hide_grades_from_student", True)
+            if hide:
+                data["score"] = None
+                data["teacherNote"] = ""
+                data["gradedAt"] = None
         return data
 
 
@@ -477,16 +633,84 @@ class QuizSerializer(serializers.ModelSerializer):
     )
     dueDate = serializers.DateField(source="due_date", format="%Y-%m-%d")
     startAt = serializers.DateTimeField(source="start_at")
+    endAt = serializers.DateTimeField(source="end_at", required=False, allow_null=True)
     durationMinutes = serializers.IntegerField(source="duration_minutes")
-    createdAt = serializers.DateTimeField(source="created_at", format="%Y-%m-%d", read_only=True)
+    maxAttempts = serializers.IntegerField(source="max_attempts", required=False, min_value=1, max_value=20)
+    gradesVisible = serializers.BooleanField(source="grades_visible", required=False)
+    reviewAllowed = serializers.BooleanField(source="review_allowed", required=False)
+    maxScore = serializers.DecimalField(source="max_score", max_digits=7, decimal_places=2, required=False)
+    groupId = serializers.UUIDField(source="group_id", read_only=True)
+    className = serializers.CharField(source="school_class.name", read_only=True)
+    teacherName = serializers.CharField(source="teacher.name", read_only=True)
+    windowStatus = serializers.SerializerMethodField()
+    submissionCount = serializers.SerializerMethodField()
+    attemptCount = serializers.SerializerMethodField()
+    attemptsRemaining = serializers.SerializerMethodField()
+    canRetake = serializers.SerializerMethodField()
+    createdAt = serializers.DateTimeField(source="created_at", read_only=True)
     questions = QuizQuestionSerializer(many=True, required=False)
 
     class Meta:
         model = Quiz
         fields = [
-            "id", "classId", "teacherId", "title", "description", "dueDate",
-            "startAt", "durationMinutes", "status", "questions", "createdAt",
+            "id",
+            "groupId",
+            "classId",
+            "teacherId",
+            "subject",
+            "title",
+            "description",
+            "dueDate",
+            "startAt",
+            "endAt",
+            "durationMinutes",
+            "maxAttempts",
+            "gradesVisible",
+            "reviewAllowed",
+            "maxScore",
+            "className",
+            "teacherName",
+            "windowStatus",
+            "submissionCount",
+            "attemptCount",
+            "attemptsRemaining",
+            "canRetake",
+            "status",
+            "questions",
+            "createdAt",
         ]
+
+    def get_windowStatus(self, obj):
+        from assignments.quiz_services import quiz_window_status
+
+        return quiz_window_status(obj)
+
+    def get_submissionCount(self, obj):
+        return obj.submissions.values("student_id").distinct().count()
+
+    def get_attemptCount(self, obj):
+        student = self.context.get("student")
+        if not student:
+            return None
+        from assignments.quiz_services import quiz_attempt_count
+
+        return quiz_attempt_count(obj, student)
+
+    def get_attemptsRemaining(self, obj):
+        student = self.context.get("student")
+        if not student:
+            return None
+        from assignments.quiz_services import quiz_attempts_remaining
+
+        return quiz_attempts_remaining(obj, student)
+
+    def get_canRetake(self, obj):
+        student = self.context.get("student")
+        if not student:
+            return None
+        from assignments.quiz_services import can_take_quiz_attempt
+
+        return can_take_quiz_attempt(obj, student)
 
     def create(self, validated_data):
         questions_data = validated_data.pop("questions", [])
@@ -507,29 +731,205 @@ class QuizSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         data["id"] = str(data["id"])
+        data["groupId"] = str(data.get("groupId") or data["id"])
         data["classId"] = str(data["classId"])
         data["teacherId"] = str(data["teacherId"])
+        if data.get("createdAt"):
+            data["createdAt"] = str(data["createdAt"])
+        if data.get("startAt"):
+            data["startAt"] = str(data["startAt"])
+        if data.get("endAt"):
+            data["endAt"] = str(data["endAt"])
+        if data.get("maxScore") is not None:
+            data["maxScore"] = float(data["maxScore"])
         return data
 
 
 class QuizSubmissionSerializer(serializers.ModelSerializer):
     quizId = serializers.PrimaryKeyRelatedField(source="quiz", queryset=Quiz.objects.all())
     studentId = serializers.PrimaryKeyRelatedField(source="student", queryset=Student.objects.all())
-    maxScore = serializers.DecimalField(source="max_score", max_digits=5, decimal_places=2)
+    maxScore = serializers.DecimalField(source="max_score", max_digits=7, decimal_places=2)
+    autoScore = serializers.DecimalField(source="auto_score", max_digits=7, decimal_places=2, read_only=True)
+    manualScores = serializers.JSONField(source="manual_scores", required=False)
+    teacherNote = serializers.CharField(source="teacher_note", required=False, allow_blank=True)
+    gradedAt = serializers.DateTimeField(source="graded_at", read_only=True)
     submittedAt = serializers.DateTimeField(source="submitted_at", read_only=True)
     timeSpentSeconds = serializers.IntegerField(source="time_spent_seconds")
+    attemptNumber = serializers.IntegerField(source="attempt_number", read_only=True)
+    isBestAttempt = serializers.SerializerMethodField()
+    gradesVisible = serializers.BooleanField(source="quiz.grades_visible", read_only=True)
+    quizTitle = serializers.CharField(source="quiz.title", read_only=True)
+    quizSubject = serializers.CharField(source="quiz.subject", read_only=True)
+    studentName = serializers.CharField(source="student.name", read_only=True)
+    className = serializers.CharField(source="quiz.school_class.name", read_only=True)
+    fullyGraded = serializers.SerializerMethodField()
+    needsManualGrading = serializers.SerializerMethodField()
+    answerAttachments = serializers.SerializerMethodField()
 
     class Meta:
         model = QuizSubmission
-        fields = ["id", "quizId", "studentId", "answers", "score", "maxScore", "submittedAt", "timeSpentSeconds"]
+        fields = [
+            "id",
+            "quizId",
+            "studentId",
+            "studentName",
+            "className",
+            "quizTitle",
+            "quizSubject",
+            "answers",
+            "answerAttachments",
+            "autoScore",
+            "manualScores",
+            "score",
+            "maxScore",
+            "teacherNote",
+            "gradedAt",
+            "fullyGraded",
+            "needsManualGrading",
+            "gradesVisible",
+            "submittedAt",
+            "timeSpentSeconds",
+            "attemptNumber",
+            "isBestAttempt",
+        ]
+
+    def get_isBestAttempt(self, obj):
+        best_ids = self.context.get("best_submission_ids")
+        if best_ids is not None:
+            return obj.id in best_ids
+        from assignments.quiz_services import best_quiz_submission
+
+        best = best_quiz_submission(obj.quiz, obj.student)
+        return bool(best and best.id == obj.id)
+
+    def get_fullyGraded(self, obj):
+        from assignments.quiz_services import quiz_submission_fully_graded
+
+        questions = list(obj.quiz.questions.all())
+        if quiz_submission_fully_graded(obj, questions):
+            return True
+        return obj.graded_at is not None
+
+    def get_needsManualGrading(self, obj):
+        from assignments.quiz_services import quiz_has_manual_questions, quiz_submission_fully_graded
+
+        if obj.graded_at is not None:
+            return False
+        questions = list(obj.quiz.questions.all())
+        if not quiz_has_manual_questions(questions):
+            return False
+        return not quiz_submission_fully_graded(obj, questions)
+
+    def get_answerAttachments(self, obj):
+        from assignments.attachment_utils import quiz_answer_attachments_payload
+
+        return quiz_answer_attachments_payload(obj, self.context.get("request"))
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
         data["id"] = str(data["id"])
         data["quizId"] = str(data["quizId"])
         data["studentId"] = str(data["studentId"])
-        data["score"] = float(data["score"])
+        if data.get("score") is not None:
+            data["score"] = float(data["score"])
+        if data.get("autoScore") is not None:
+            data["autoScore"] = float(data["autoScore"])
         data["maxScore"] = float(data["maxScore"])
+        hide = self.context.get("hide_grades_from_student")
+        if hide and (not instance.quiz.grades_visible or not data.get("fullyGraded")):
+            data["score"] = None
+            data["autoScore"] = None
+        return data
+
+
+class SubjectAnnouncementSerializer(serializers.ModelSerializer):
+    classId = serializers.PrimaryKeyRelatedField(source="school_class", queryset=SchoolClass.objects.all())
+    teacherId = serializers.PrimaryKeyRelatedField(
+        source="teacher", queryset=TeacherProfile.objects.all(), required=False
+    )
+    groupId = serializers.UUIDField(source="group_id", read_only=True)
+    className = serializers.CharField(source="school_class.name", read_only=True)
+    teacherName = serializers.CharField(source="teacher.name", read_only=True)
+    createdAt = serializers.DateTimeField(source="created_at", read_only=True)
+
+    class Meta:
+        model = SubjectAnnouncement
+        fields = [
+            "id",
+            "groupId",
+            "classId",
+            "teacherId",
+            "className",
+            "teacherName",
+            "subject",
+            "title",
+            "body",
+            "createdAt",
+        ]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["id"] = str(data["id"])
+        data["classId"] = str(data["classId"])
+        if data.get("teacherId") is not None:
+            data["teacherId"] = str(data["teacherId"])
+        data["groupId"] = str(data["groupId"])
+        return data
+
+
+MATERIAL_CATEGORY_LABELS = {
+    "book": "كتاب / كتيب",
+    "slides": "سلايدات",
+    "resources": "مصادر",
+    "other": "أخرى",
+}
+
+
+class SubjectMaterialSerializer(serializers.ModelSerializer):
+    classId = serializers.PrimaryKeyRelatedField(source="school_class", queryset=SchoolClass.objects.all())
+    teacherId = serializers.PrimaryKeyRelatedField(
+        source="teacher", queryset=TeacherProfile.objects.all(), required=False
+    )
+    groupId = serializers.UUIDField(source="group_id", read_only=True)
+    className = serializers.CharField(source="school_class.name", read_only=True)
+    teacherName = serializers.CharField(source="teacher.name", read_only=True)
+    createdAt = serializers.DateTimeField(source="created_at", read_only=True)
+    categoryLabel = serializers.SerializerMethodField()
+    attachments = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SubjectMaterial
+        fields = [
+            "id",
+            "groupId",
+            "classId",
+            "teacherId",
+            "className",
+            "teacherName",
+            "subject",
+            "title",
+            "description",
+            "category",
+            "categoryLabel",
+            "attachments",
+            "createdAt",
+        ]
+
+    def get_categoryLabel(self, obj):
+        return MATERIAL_CATEGORY_LABELS.get(obj.category, obj.category)
+
+    def get_attachments(self, obj):
+        from assignments.attachment_utils import material_attachments_payload
+
+        return material_attachments_payload(obj, self.context.get("request"))
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["id"] = str(data["id"])
+        data["classId"] = str(data["classId"])
+        if data.get("teacherId") is not None:
+            data["teacherId"] = str(data["teacherId"])
+        data["groupId"] = str(data["groupId"])
         return data
 
 
@@ -568,6 +968,8 @@ class FinanceNoticeSerializer(serializers.Serializer):
     date = serializers.CharField()
     note = serializers.CharField(allow_blank=True, required=False)
     receiptUrl = serializers.CharField(allow_null=True, required=False)
+    source = serializers.CharField(required=False)
+    reviewedByName = serializers.CharField(allow_null=True, required=False)
 
 
 class FeeInstallmentSerializer(serializers.ModelSerializer):

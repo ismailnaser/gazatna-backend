@@ -54,6 +54,32 @@ class FeeBlockingTests(SimpleTestCase):
         self.assertEqual(blocking.order, 2)
         self.assertEqual(remaining, Decimal("834"))
 
+    def test_second_installment_blocks_from_start_date(self):
+        installments = [
+            _inst(1, 834, date(2026, 1, 1), date(2026, 1, 31)),
+            _inst(2, 834, date(2026, 6, 17), date(2026, 7, 17)),
+        ]
+        paid = Decimal("834")
+        today = date(2026, 6, 17)
+
+        blocking, remaining = find_blocking_installment(installments, paid, today)
+
+        self.assertEqual(blocking.order, 2)
+        self.assertEqual(remaining, Decimal("834"))
+
+    def test_second_installment_not_blocked_before_start_date(self):
+        installments = [
+            _inst(1, 834, date(2026, 1, 1), date(2026, 1, 31)),
+            _inst(2, 834, date(2026, 6, 17), date(2026, 7, 17)),
+        ]
+        paid = Decimal("834")
+        today = date(2026, 6, 10)
+
+        blocking, remaining = find_blocking_installment(installments, paid, today)
+
+        self.assertIsNone(blocking)
+        self.assertEqual(remaining, Decimal("0"))
+
     def test_installment_remaining_is_per_installment(self):
         installments = [
             _inst(1, 500),
