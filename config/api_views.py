@@ -5,7 +5,7 @@ import uuid
 from django.db.models import Avg, Count, Max, Sum
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
-from rest_framework import status, viewsets
+from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -13,14 +13,28 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from academics.models import (
+    AcademicTerm,
+    AcademicYear,
     ClassGradebook,
     Grade,
     ParentDismissedAlert,
+    PromotionPolicy,
     SchoolClass,
     Student,
     StudentDocument,
     Subject,
     SubjectGrade,
+    SubjectGradeScheme,
+    SubjectGradeSchemeEntry,
+)
+from academics.academic_serializers import AcademicYearWriteSerializer, PromotionPolicySerializer
+from academics.academic_services import (
+    ensure_default_academic_calendar,
+    require_current_academic_term,
+    serialize_academic_context,
+    serialize_academic_year,
+    set_active_academic_year,
+    set_current_academic_term,
 )
 from accounts.models import User
 from accounts.roles import ADMIN_ROLES
@@ -81,6 +95,7 @@ from config.serializers import (
     TeacherProfileSerializer,
     TeacherWriteSerializer,
     ParentAlertSerializer,
+    ScheduleSerializer,
 )
 from content.models import (
     Accreditation,
@@ -94,6 +109,7 @@ from content.models import (
     Program,
     SchoolStat,
     SchoolValue,
+    Schedule,
     SiteSettings,
 )
 from finance.models import FeePlan, PaymentNotice, PaymentSource, PaymentStatus, StudentFeeBalance
@@ -192,18 +208,9 @@ def _build_fees_chart() -> list[dict]:
 
 
 def _build_grade_chart() -> list[dict]:
-    grade_chart = []
-    for level in ["التاسع", "العاشر", "الحادي عشر", "الثاني عشر"]:
-        avg = SubjectGrade.objects.filter(
-            student__grade_level__contains=level
-        ).aggregate(a=Avg("score"))["a"]
-        if avg is None:
-            continue
-        value = round(float(avg))
-        if value <= 0:
-            continue
-        grade_chart.append({"label": level, "value": value})
-    return grade_chart
+    from academics.analytics_services import grade_chart_by_level
+
+    return grade_chart_by_level()
 
 
 def _child_for_parent(user):
@@ -526,16 +533,32 @@ def _sync_grade_sections_count(grade_name: str):
 class AdminGradeViewSet(viewsets.ModelViewSet):
     permission_classes = [AdminScopePermission("academics")]
     serializer_class = GradeSerializer
-    queryset = Grade.objects.order_by("sort_order", "id")
+    queryset = Grade.objects.prefetch_related("promotion_policy").order_by("sort_order", "id")
 
     def perform_create(self, serializer):
+        from academics.academic_services import get_promotion_policy_for_grade
+
         max_order = Grade.objects.aggregate(Max("sort_order"))["sort_order__max"] or 0
         grade = serializer.save(sort_order=max_order + 1)
         _sync_grade_sections(grade)
+        get_promotion_policy_for_grade(grade)
 
     def perform_update(self, serializer):
         grade = serializer.save()
         _sync_grade_sections(grade)
+
+    @action(detail=True, methods=["patch"], url_path="promotion-policy")
+    def update_promotion_policy(self, request, pk=None):
+        from academics.academic_serializers import PromotionPolicySerializer
+        from academics.academic_services import get_promotion_policy_for_grade
+
+        grade = self.get_object()
+        policy = get_promotion_policy_for_grade(grade)
+        serializer = PromotionPolicySerializer(policy, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        grade.refresh_from_db()
+        return Response(GradeSerializer(grade).data)
 
     @action(detail=False, methods=["post"], url_path="reorder")
     def reorder(self, request):
@@ -771,7 +794,9 @@ class AdminAnalyticsView(APIView):
     permission_classes = [IsAdmin]
 
     def get(self, request):
-        avg_grade = SubjectGrade.objects.aggregate(avg=Avg("score"))["avg"] or 0
+        from academics.analytics_services import average_grade_percent
+
+        avg_grade = average_grade_percent()
         balances = StudentFeeBalance.objects.all()
         total_fees = balances.aggregate(t=Sum("total"))["t"] or 0
         paid_fees = balances.aggregate(p=Sum("paid"))["p"] or 0
@@ -829,7 +854,7 @@ class AdminAnalyticsView(APIView):
         fees_chart = _build_fees_chart()
 
         return Response({
-            "avgGrade": round(float(avg_grade), 1),
+            "avgGrade": avg_grade,
             "feesCollected": fees_collected,
             "pendingPayments": pending_count,
             "inactiveStudents": inactive_students,
@@ -870,16 +895,9 @@ class AdminAnalyticsDetailsView(APIView):
             balances_qs = balances_qs.filter(student__grade_level=grade_level)
 
         # Success rate chart by grade level (or a single grade if filtered)
-        grade_rows = (
-            grades_qs.values("student__grade_level")
-            .annotate(avg=Avg("score"))
-            .order_by("student__grade_level")
-        )
-        grade_chart = [
-            {"label": (row["student__grade_level"] or ""), "value": round(float(row["avg"] or 0), 1)}
-            for row in grade_rows
-            if row["student__grade_level"]
-        ]
+        from academics.analytics_services import average_grade_percent, grade_chart_by_level
+
+        grade_chart = grade_chart_by_level(grades_qs)
 
         # Fees collected % chart by grade level (or a single grade if filtered)
         balance_rows = (
@@ -917,7 +935,7 @@ class AdminAnalyticsDetailsView(APIView):
             fees_chart.append({"label": gl, "value": pct})
 
         # Summary tiles for the current filter
-        avg_grade = grades_qs.aggregate(avg=Avg("score"))["avg"] or 0
+        avg_grade = average_grade_percent(grades_qs)
         total_fees = balances_qs.aggregate(t=Sum("total"))["t"] or 0
         paid_fees = balances_qs.aggregate(p=Sum("paid"))["p"] or 0
         if from_date or to_date:
@@ -934,7 +952,7 @@ class AdminAnalyticsDetailsView(APIView):
 
         return Response(
             {
-                "avgGrade": round(float(avg_grade), 1),
+                "avgGrade": avg_grade,
                 "feesCollected": fees_collected,
                 "urgentTasks": [],
                 "gradeChart": grade_chart,
@@ -1416,6 +1434,204 @@ class TeacherAssessmentsView(APIView):
             )
         data.sort(key=lambda row: row["homework"].get("createdAt", ""), reverse=True)
         return Response(data)
+
+
+class TeacherGradeSchemeView(APIView):
+    permission_classes = [IsTeacher]
+
+    def _parse_class_ids(self, values, fallback=None):
+        ids: list[str] = []
+        if isinstance(values, list):
+            for value in values:
+                if value is None:
+                    continue
+                text = str(value).strip()
+                if not text:
+                    continue
+                if "," in text:
+                    ids.extend(part.strip() for part in text.split(",") if part.strip())
+                else:
+                    ids.append(text)
+        elif values:
+            text = str(values).strip()
+            if text:
+                ids.extend(part.strip() for part in text.split(",") if part.strip())
+        if not ids and fallback:
+            text = str(fallback).strip()
+            if text:
+                ids.append(text)
+        return ids
+
+    def _parse_subjects(self, values, fallback=None):
+        if isinstance(values, list):
+            return [str(value).strip() for value in values if str(value).strip()]
+        if values:
+            text = str(values).strip()
+            return [text] if text else []
+        if fallback:
+            text = str(fallback).strip()
+            return [text] if text else []
+        return []
+
+    def _school_classes_for_teacher(self, teacher, class_ids):
+        from academics.grade_scheme_services import teacher_teachable_class_ids
+
+        allowed_ids = set(teacher_teachable_class_ids(teacher))
+        school_classes = []
+        for class_id in class_ids:
+            school_class = SchoolClass.objects.filter(id=class_id).first()
+            if not school_class:
+                raise ValidationError({"classIds": f"الفصل {class_id} غير موجود"})
+            if school_class.id not in allowed_ids:
+                raise ValidationError({"classIds": f"لا تدرّس في فصل {school_class.name}"})
+            school_classes.append(school_class)
+        return school_classes
+
+    def get(self, request):
+        from academics.grade_scheme_services import (
+            pick_representative_scheme,
+            serialize_entries_for_classes,
+            serialize_grade_scheme,
+            teacher_subjects_for_classes,
+        )
+        from academics.academic_services import ensure_default_academic_calendar, serialize_academic_context
+
+        ensure_default_academic_calendar()
+        teacher = _teacher_for_user(request.user)
+        if not teacher:
+            return Response({"detail": "غير مصرح"}, status=status.HTTP_403_FORBIDDEN)
+
+        class_ids = self._parse_class_ids(
+            request.query_params.getlist("classIds"),
+            request.query_params.get("classId") or request.query_params.get("classIds"),
+        )
+        subject = (request.query_params.get("subject") or "").strip()
+
+        if not class_ids:
+            return Response(
+                {
+                    "availableSubjects": [],
+                    "scheme": None,
+                    "entries": [],
+                    "classIds": [],
+                    "subjects": [],
+                }
+            )
+
+        school_classes = self._school_classes_for_teacher(teacher, class_ids)
+        available_subjects = teacher_subjects_for_classes(teacher, school_classes)
+
+        schemes = []
+        if subject:
+            academic_term = require_current_academic_term()
+            for school_class in school_classes:
+                scheme = (
+                    SubjectGradeScheme.objects.filter(
+                        teacher=teacher,
+                        school_class=school_class,
+                        subject=subject,
+                        academic_term=academic_term,
+                    )
+                    .select_related("school_class")
+                    .first()
+                )
+                schemes.append(scheme)
+
+        representative = pick_representative_scheme(schemes)
+        return Response(
+            {
+                "availableSubjects": available_subjects,
+                "scheme": serialize_grade_scheme(representative) if representative else None,
+                "entries": serialize_entries_for_classes(teacher, school_classes, subject),
+                "classIds": [str(school_class.id) for school_class in school_classes],
+                "subjects": [subject] if subject else [],
+                "academicContext": serialize_academic_context(),
+            }
+        )
+
+    def put(self, request):
+        from academics.academic_services import serialize_academic_context
+        from academics.grade_scheme_services import (
+            normalize_components,
+            serialize_entries_for_classes,
+            serialize_grade_scheme,
+            upsert_grade_schemes_for_subjects,
+        )
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+
+        teacher = _teacher_for_user(request.user)
+        if not teacher:
+            return Response({"detail": "غير مصرح"}, status=status.HTTP_403_FORBIDDEN)
+
+        class_ids = self._parse_class_ids(request.data.get("classIds"), request.data.get("classId"))
+        subjects = self._parse_subjects(request.data.get("subjects"), request.data.get("subject"))
+        if not class_ids or not subjects:
+            raise ValidationError({"detail": "اختر الفصول والمواد"})
+
+        school_classes = self._school_classes_for_teacher(teacher, class_ids)
+        components = normalize_components(request.data.get("components") or [])
+        max_score = request.data.get("maxScore", 100)
+
+        try:
+            schemes = upsert_grade_schemes_for_subjects(
+                teacher, school_classes, subjects, max_score, components
+            )
+        except serializers.ValidationError as exc:
+            raise DRFValidationError(exc.detail)
+
+        primary = schemes[0]
+        primary = SubjectGradeScheme.objects.select_related("school_class").get(pk=primary.pk)
+        active_subject = subjects[0]
+        return Response(
+            {
+                "scheme": serialize_grade_scheme(primary),
+                "entries": serialize_entries_for_classes(teacher, school_classes, active_subject),
+                "classIds": [str(school_class.id) for school_class in school_classes],
+                "subjects": subjects,
+                "academicContext": serialize_academic_context(),
+            }
+        )
+
+    def patch(self, request):
+        from academics.academic_services import serialize_academic_context
+        from academics.grade_scheme_services import (
+            pick_representative_scheme,
+            save_scheme_entries_for_subjects,
+            serialize_entries_for_classes,
+            serialize_grade_scheme,
+        )
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+
+        teacher = _teacher_for_user(request.user)
+        if not teacher:
+            return Response({"detail": "غير مصرح"}, status=status.HTTP_403_FORBIDDEN)
+
+        class_ids = self._parse_class_ids(request.data.get("classIds"), request.data.get("classId"))
+        subjects = self._parse_subjects(request.data.get("subjects"), request.data.get("subject"))
+        if not class_ids or not subjects:
+            raise ValidationError({"detail": "اختر الفصول والمواد"})
+
+        school_classes = self._school_classes_for_teacher(teacher, class_ids)
+        entries = request.data.get("entries") or []
+        try:
+            schemes = save_scheme_entries_for_subjects(teacher, school_classes, subjects, entries)
+        except serializers.ValidationError as exc:
+            raise DRFValidationError(exc.detail)
+
+        representative = pick_representative_scheme(schemes)
+        representative = SubjectGradeScheme.objects.select_related("school_class").get(pk=representative.pk)
+        active_subject = request.data.get("activeSubject") or subjects[0]
+        if active_subject not in subjects:
+            active_subject = subjects[0]
+        return Response(
+            {
+                "scheme": serialize_grade_scheme(representative),
+                "entries": serialize_entries_for_classes(teacher, school_classes, active_subject),
+                "classIds": [str(school_class.id) for school_class in school_classes],
+                "subjects": subjects,
+                "academicContext": serialize_academic_context(),
+            }
+        )
 
 
 class TeacherAlertsView(APIView):
@@ -2417,11 +2633,29 @@ class ParentGradesView(APIView):
     permission_classes = [IsParent]
 
     def get(self, request):
+        from academics.grade_scheme_services import serialize_parent_subject_grades
+        from academics.academic_services import ensure_default_academic_calendar
+
         child = _child_for_parent(request.user)
         if not child:
             return Response([])
-        grades = SubjectGrade.objects.filter(student=child)
-        return Response(SubjectGradeSerializer(grades, many=True).data)
+        ensure_default_academic_calendar()
+        return Response(serialize_parent_subject_grades(child))
+
+
+class ParentCertificatesView(APIView):
+    permission_classes = [IsParent]
+
+    def get(self, request):
+        from academics.academic_services import ensure_default_academic_calendar
+        from academics.certificate_services import active_certificate_config, serialize_parent_certificates
+
+        child = _child_for_parent(request.user)
+        if not child:
+            return Response({"published": False, "message": "لا يوجد طالب مرتبط", "certificate": None})
+        ensure_default_academic_calendar()
+        config = active_certificate_config()
+        return Response(serialize_parent_certificates(child, config))
 
 
 class ParentAssessmentsView(APIView):
@@ -3397,3 +3631,157 @@ class AdminInactiveStudentsView(APIView):
             for s in Student.objects.filter(is_active=False).order_by("-created_at", "name")
         ]
         return Response(rows)
+
+
+class AdminScheduleViewSet(viewsets.ModelViewSet):
+    permission_classes = [AdminScopePermission("academics", "students")]
+    serializer_class = ScheduleSerializer
+    queryset = Schedule.objects.prefetch_related("school_classes").all()
+    parser_classes = [JSONParser]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        schedule_type = (self.request.query_params.get("type") or "").strip()
+        if schedule_type in ("exam", "class"):
+            qs = qs.filter(schedule_type=schedule_type)
+        return qs
+
+
+class ParentSchedulesView(APIView):
+    permission_classes = [IsParent]
+
+    def get(self, request):
+        child = _child_for_parent(request.user)
+        if not child or not child.school_class_id:
+            return Response([])
+
+        schedule_type = (request.query_params.get("type") or "").strip()
+        qs = Schedule.objects.filter(is_published=True).prefetch_related("school_classes")
+        if schedule_type in ("exam", "class"):
+            qs = qs.filter(schedule_type=schedule_type)
+
+        qs = qs.filter(school_classes__id=child.school_class_id).distinct().order_by("-updated_at", "-id")
+        return Response(ScheduleSerializer(qs, many=True).data)
+
+
+class AcademicContextView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        ensure_default_academic_calendar()
+        return Response(serialize_academic_context())
+
+
+class AdminAcademicYearViewSet(viewsets.ModelViewSet):
+    permission_classes = [AdminScopePermission("academics")]
+    serializer_class = AcademicYearWriteSerializer
+    queryset = AcademicYear.objects.prefetch_related("terms").all()
+
+    @action(detail=True, methods=["post"], url_path="set-active")
+    def set_active(self, request, pk=None):
+        year = self.get_object()
+        set_active_academic_year(year)
+        return Response(serialize_academic_year(year))
+
+    @action(detail=True, methods=["post"], url_path="set-current-term")
+    def set_current_term(self, request, pk=None):
+        year = self.get_object()
+        term_id = str(request.data.get("termId") or "").strip()
+        if not term_id:
+            return Response({"detail": "يجب تحديد الفصل الدراسي"}, status=status.HTTP_400_BAD_REQUEST)
+        term = AcademicTerm.objects.filter(id=term_id, academic_year=year).first()
+        if not term:
+            return Response({"detail": "الفصل الدراسي غير موجود"}, status=status.HTTP_404_NOT_FOUND)
+        set_current_academic_term(term)
+        return Response(serialize_academic_year(year))
+
+    @action(detail=True, methods=["get", "post"], url_path="promotion-preview")
+    def promotion_preview(self, request, pk=None):
+        from academics.promotion_services import preview_year_end
+
+        year = self.get_object()
+        overrides = {}
+        if request.method == "POST" and isinstance(request.data.get("decisions"), list):
+            for item in request.data["decisions"]:
+                if not isinstance(item, dict):
+                    continue
+                student_id = str(item.get("studentId") or item.get("id") or "").strip()
+                action = str(item.get("action") or "").strip()
+                if student_id and action in {"promote", "repeat", "graduate"}:
+                    overrides[student_id] = action
+        return Response(preview_year_end(year, overrides=overrides))
+
+    @action(detail=True, methods=["post"], url_path="execute-rollover")
+    def execute_rollover(self, request, pk=None):
+        from academics.promotion_services import execute_year_end
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+
+        year = self.get_object()
+        try:
+            result = execute_year_end(
+                year,
+                request.user,
+                decisions=request.data.get("decisions"),
+                new_year_name=request.data.get("newYearName"),
+            )
+        except serializers.ValidationError as exc:
+            raise DRFValidationError(exc.detail)
+        return Response(result)
+
+    @action(detail=True, methods=["get", "patch"], url_path="certificate-config")
+    def certificate_config(self, request, pk=None):
+        from academics.certificate_services import (
+            get_or_create_certificate_config,
+            serialize_certificate_config,
+            update_certificate_config,
+        )
+
+        year = self.get_object()
+        config = get_or_create_certificate_config(year)
+        if request.method == "PATCH":
+            config = update_certificate_config(year, request.data)
+        return Response(serialize_certificate_config(config))
+
+    @action(detail=True, methods=["post"], url_path="publish-certificates")
+    def publish_certificates(self, request, pk=None):
+        from academics.certificate_services import publish_certificates, serialize_certificate_config
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+
+        year = self.get_object()
+        try:
+            config = publish_certificates(year, request.user, term_id=request.data.get("termId"))
+        except serializers.ValidationError as exc:
+            raise DRFValidationError(exc.detail)
+        return Response(serialize_certificate_config(config))
+
+    @action(detail=True, methods=["post"], url_path="unpublish-certificates")
+    def unpublish_certificates(self, request, pk=None):
+        from academics.certificate_services import serialize_certificate_config, unpublish_certificates
+
+        year = self.get_object()
+        config = unpublish_certificates(year)
+        return Response(serialize_certificate_config(config))
+
+    @action(detail=True, methods=["get", "post"], url_path="certificate-preview")
+    def certificate_preview(self, request, pk=None):
+        from academics.certificate_services import preview_certificates
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+
+        year = self.get_object()
+        overrides = {}
+        if request.method == "POST" and isinstance(request.data, dict):
+            for key in (
+                "termId",
+                "issuanceScope",
+                "honorsEnabled",
+                "honorsMinAverage",
+                "honorsTitle",
+                "honorsMessage",
+                "certificateTitle",
+            ):
+                if key in request.data:
+                    overrides[key] = request.data[key]
+        try:
+            return Response(preview_certificates(year, overrides=overrides or None))
+        except serializers.ValidationError as exc:
+            raise DRFValidationError(exc.detail)

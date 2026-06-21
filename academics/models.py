@@ -142,11 +142,19 @@ class SubjectGrade(models.Model):
     max_score = models.DecimalField(max_digits=5, decimal_places=2, default=100)
     note = models.TextField(blank=True)
     term = models.CharField(max_length=50, blank=True)
+    academic_term = models.ForeignKey(
+        "AcademicTerm",
+        on_delete=models.CASCADE,
+        related_name="subject_grades",
+        null=True,
+        blank=True,
+    )
 
     class Meta:
         verbose_name = "درجة مادة"
         verbose_name_plural = "درجات المواد"
         ordering = ["subject"]
+        unique_together = [("student", "subject", "academic_term")]
 
 
 class ClassGradebook(models.Model):
@@ -166,6 +174,290 @@ class ClassGradebook(models.Model):
         unique_together = [("student", "school_class")]
         verbose_name = "سجل درجات الصف"
         verbose_name_plural = "سجلات درجات الصفوف"
+
+
+class SubjectGradeScheme(models.Model):
+    teacher = models.ForeignKey(
+        "staff.TeacherProfile",
+        on_delete=models.CASCADE,
+        related_name="grade_schemes",
+    )
+    school_class = models.ForeignKey(
+        SchoolClass,
+        on_delete=models.CASCADE,
+        related_name="grade_schemes",
+    )
+    subject = models.CharField(max_length=100)
+    academic_term = models.ForeignKey(
+        "AcademicTerm",
+        on_delete=models.CASCADE,
+        related_name="grade_schemes",
+        null=True,
+        blank=True,
+    )
+    max_score = models.DecimalField(max_digits=6, decimal_places=2, default=100)
+    components = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [("teacher", "school_class", "subject", "academic_term")]
+        verbose_name = "تقسيمة علامات مادة"
+        verbose_name_plural = "تقسيمات علامات المواد"
+        ordering = ["-updated_at", "-id"]
+
+    def __str__(self):
+        return f"{self.subject} — {self.school_class.name}"
+
+
+class SubjectGradeSchemeEntry(models.Model):
+    scheme = models.ForeignKey(
+        SubjectGradeScheme,
+        on_delete=models.CASCADE,
+        related_name="entries",
+    )
+    student = models.ForeignKey(
+        Student,
+        on_delete=models.CASCADE,
+        related_name="grade_scheme_entries",
+    )
+    scores = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        unique_together = [("scheme", "student")]
+        verbose_name = "علامة طالب في تقسيمة"
+        verbose_name_plural = "علامات الطلاب في التقسيمات"
+
+
+class AcademicYear(models.Model):
+    STATUS_DRAFT = "draft"
+    STATUS_ACTIVE = "active"
+    STATUS_ARCHIVED = "archived"
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, "مسودة"),
+        (STATUS_ACTIVE, "نشطة"),
+        (STATUS_ARCHIVED, "مؤرشفة"),
+    ]
+
+    name = models.CharField(max_length=20, unique=True)
+    start_date = models.DateField()
+    end_date = models.DateField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    is_active = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "سنة دراسية"
+        verbose_name_plural = "السنوات الدراسية"
+        ordering = ["-start_date", "-id"]
+
+    def __str__(self):
+        return self.name
+
+
+class AcademicTerm(models.Model):
+    academic_year = models.ForeignKey(
+        AcademicYear,
+        on_delete=models.CASCADE,
+        related_name="terms",
+    )
+    name = models.CharField(max_length=100)
+    sort_order = models.PositiveIntegerField(default=1)
+    start_date = models.DateField()
+    end_date = models.DateField()
+    is_current = models.BooleanField(default=False)
+
+    class Meta:
+        verbose_name = "فصل دراسي"
+        verbose_name_plural = "الفصول الدراسية"
+        ordering = ["academic_year", "sort_order", "id"]
+        unique_together = [("academic_year", "sort_order")]
+
+    def __str__(self):
+        return f"{self.academic_year.name} — {self.name}"
+
+
+class PromotionPolicy(models.Model):
+    EVAL_SINGLE_TERM = "single_term"
+    EVAL_FULL_YEAR = "full_year"
+    EVALUATION_SCOPE_CHOICES = [
+        (EVAL_SINGLE_TERM, "فصل واحد"),
+        (EVAL_FULL_YEAR, "السنة كاملة"),
+    ]
+
+    CALC_TERM_AVERAGE = "term_average"
+    CALC_YEAR_TOTAL = "year_total"
+    CALC_PER_TERM_COMBINE = "per_term_combine"
+    CALC_SINGLE_TERM = "single_term_only"
+    YEAR_CALCULATION_CHOICES = [
+        (CALC_TERM_AVERAGE, "متوسط الفصلين"),
+        (CALC_YEAR_TOTAL, "مجموع السنة"),
+        (CALC_PER_TERM_COMBINE, "كل فصل على حدة ثم يُجمع القرار"),
+        (CALC_SINGLE_TERM, "فصل واحد محدد"),
+    ]
+
+    PASS_ALL_SUBJECTS = "all_subjects"
+    PASS_MINIMUM_COUNT = "minimum_count"
+    PASS_RULE_CHOICES = [
+        (PASS_ALL_SUBJECTS, "جميع المواد"),
+        (PASS_MINIMUM_COUNT, "عدد محدد من المواد"),
+    ]
+
+    MODE_AUTOMATIC = "automatic"
+    MODE_MANUAL = "manual"
+    PROMOTION_MODE_CHOICES = [
+        (MODE_AUTOMATIC, "تلقائي"),
+        (MODE_MANUAL, "يدوي"),
+    ]
+
+    FAIL_REPEAT_AUTO = "repeat_auto"
+    FAIL_MANUAL_REVIEW = "manual_review"
+    FAILURE_MODE_CHOICES = [
+        (FAIL_REPEAT_AUTO, "إعادة تلقائية"),
+        (FAIL_MANUAL_REVIEW, "اعتماد يدوي"),
+    ]
+
+    grade = models.OneToOneField(
+        "Grade",
+        on_delete=models.CASCADE,
+        related_name="promotion_policy",
+    )
+    evaluation_scope = models.CharField(
+        max_length=30,
+        choices=EVALUATION_SCOPE_CHOICES,
+        default=EVAL_FULL_YEAR,
+    )
+    year_calculation_method = models.CharField(
+        max_length=30,
+        choices=YEAR_CALCULATION_CHOICES,
+        default=CALC_TERM_AVERAGE,
+    )
+    evaluation_term = models.ForeignKey(
+        AcademicTerm,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="promotion_policies",
+    )
+    pass_rule = models.CharField(
+        max_length=30,
+        choices=PASS_RULE_CHOICES,
+        default=PASS_MINIMUM_COUNT,
+    )
+    pass_minimum_count = models.PositiveIntegerField(default=1)
+    required_subjects = models.JSONField(default=list, blank=True)
+    pass_score_ratio = models.DecimalField(max_digits=4, decimal_places=3, default=0.5)
+    pass_promotion_mode = models.CharField(
+        max_length=20,
+        choices=PROMOTION_MODE_CHOICES,
+        default=MODE_AUTOMATIC,
+    )
+    fail_handling_mode = models.CharField(
+        max_length=20,
+        choices=FAILURE_MODE_CHOICES,
+        default=FAIL_MANUAL_REVIEW,
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "سياسة الترفيع"
+        verbose_name_plural = "سياسات الترفيع"
+
+    def __str__(self):
+        return f"سياسة {self.grade.name}"
+
+
+class YearEndPromotionRun(models.Model):
+    STATUS_EXECUTED = "executed"
+    STATUS_CHOICES = [
+        (STATUS_EXECUTED, "منفّذ"),
+    ]
+
+    academic_year = models.ForeignKey(
+        AcademicYear,
+        on_delete=models.CASCADE,
+        related_name="promotion_runs",
+    )
+    new_academic_year = models.ForeignKey(
+        AcademicYear,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_from_runs",
+    )
+    executed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="promotion_runs",
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_EXECUTED)
+    summary = models.JSONField(default=dict, blank=True)
+    student_results = models.JSONField(default=list, blank=True)
+    executed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "تنفيذ نهاية سنة"
+        verbose_name_plural = "تنفيذات نهاية السنة"
+        ordering = ["-executed_at", "-id"]
+
+    def __str__(self):
+        return f"نهاية {self.academic_year.name}"
+
+
+class CertificateConfig(models.Model):
+    SCOPE_TERM = "term"
+    SCOPE_YEAR = "year"
+    ISSUANCE_SCOPE_CHOICES = [
+        (SCOPE_TERM, "كل فصل دراسي"),
+        (SCOPE_YEAR, "كل سنة دراسية"),
+    ]
+
+    academic_year = models.OneToOneField(
+        AcademicYear,
+        on_delete=models.CASCADE,
+        related_name="certificate_config",
+    )
+    issuance_scope = models.CharField(
+        max_length=20,
+        choices=ISSUANCE_SCOPE_CHOICES,
+        default=SCOPE_TERM,
+    )
+    is_published = models.BooleanField(default=False)
+    published_at = models.DateTimeField(null=True, blank=True)
+    published_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="published_certificates",
+    )
+    published_term = models.ForeignKey(
+        AcademicTerm,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="certificate_publications",
+    )
+    honors_enabled = models.BooleanField(default=True)
+    honors_min_average = models.DecimalField(max_digits=5, decimal_places=2, default=95)
+    honors_title = models.CharField(max_length=120, default="شهادة تقدير")
+    honors_message = models.TextField(
+        default=(
+            "تقديراً للتميز والاجتهاد، تُمنح هذه الشهادة اعترافاً بالمعدل العالي "
+            "والأداء المتميز طوال الفترة الدراسية."
+        )
+    )
+    certificate_title = models.CharField(max_length=120, default="شهادة علامات")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "إعدادات الشهادات"
+        verbose_name_plural = "إعدادات الشهادات"
+
+    def __str__(self):
+        return f"شهادات {self.academic_year.name}"
 
 
 class ParentDismissedAlert(models.Model):

@@ -9,6 +9,7 @@ from content.models import (
     NewsItem,
     Policy,
     Program,
+    Schedule,
     SchoolStat,
     SchoolValue,
 )
@@ -96,8 +97,17 @@ class GradeSerializer(serializers.ModelSerializer):
         return value
 
     def to_representation(self, instance):
+        from academics.academic_services import serialize_promotion_policy
+
         data = super().to_representation(instance)
         data["id"] = str(data["id"])
+        policy = getattr(instance, "promotion_policy", None)
+        if policy is None:
+            try:
+                policy = instance.promotion_policy
+            except Exception:
+                policy = None
+        data["promotionPolicy"] = serialize_promotion_policy(policy) if policy else None
         return data
 
 
@@ -324,6 +334,8 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
     imageUrl = serializers.SerializerMethodField()
     imageGradient = serializers.CharField(source="image_gradient", required=False, allow_blank=True)
     classIds = serializers.SerializerMethodField()
+    teachableClassIds = serializers.SerializerMethodField()
+    subjectClassIds = serializers.SerializerMethodField()
 
     class Meta:
         model = TeacherProfile
@@ -343,6 +355,8 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
             "imageGradient",
             "is_public",
             "classIds",
+            "teachableClassIds",
+            "subjectClassIds",
         ]
         extra_kwargs = {"image": {"write_only": True}}
 
@@ -377,6 +391,16 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
         assigned = {a.school_class_id for a in obj.class_assignments.select_related("school_class")}
         homeroom = set(obj.homeroom_classes.values_list("id", flat=True))
         return [str(cid) for cid in sorted(assigned | homeroom)]
+
+    def get_teachableClassIds(self, obj):
+        from academics.grade_scheme_services import teacher_teachable_class_ids
+
+        return [str(class_id) for class_id in teacher_teachable_class_ids(obj)]
+
+    def get_subjectClassIds(self, obj):
+        from academics.grade_scheme_services import teacher_subject_class_map
+
+        return teacher_subject_class_map(obj)
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -1278,6 +1302,76 @@ class ParentAlertSerializer(serializers.Serializer):
     id = serializers.CharField()
     text = serializers.CharField()
     type = serializers.CharField()
+
+
+class ScheduleSerializer(serializers.ModelSerializer):
+    scheduleType = serializers.ChoiceField(
+        source="schedule_type",
+        choices=["exam", "class"],
+    )
+    classIds = serializers.ListField(child=serializers.IntegerField(), write_only=True)
+    classLabels = serializers.SerializerMethodField()
+    isPublished = serializers.BooleanField(source="is_published", required=False)
+    createdAt = serializers.DateTimeField(source="created_at", read_only=True)
+    updatedAt = serializers.DateTimeField(source="updated_at", read_only=True)
+
+    class Meta:
+        model = Schedule
+        fields = [
+            "id",
+            "name",
+            "scheduleType",
+            "classIds",
+            "classLabels",
+            "entries",
+            "isPublished",
+            "createdAt",
+            "updatedAt",
+        ]
+
+    def get_classLabels(self, obj):
+        labels = []
+        for school_class in obj.school_classes.all():
+            section = school_class.section or ""
+            label = f"{school_class.grade_level} - {section}".strip(" -")
+            labels.append(label or school_class.name)
+        return labels
+
+    def validate(self, attrs):
+        class_ids = self.initial_data.get("classIds") if hasattr(self, "initial_data") else None
+        if self.instance is None:
+            if not class_ids:
+                raise serializers.ValidationError({"classIds": "يجب اختيار فصل أو شعبة واحدة على الأقل"})
+        elif class_ids is not None and len(class_ids) == 0:
+            raise serializers.ValidationError({"classIds": "يجب اختيار فصل أو شعبة واحدة على الأقل"})
+        entries = attrs.get("entries")
+        if entries is not None and len(entries) == 0:
+            raise serializers.ValidationError({"entries": "يجب إضافة صف واحد على الأقل في الجدول"})
+        if self.instance is None and entries is None:
+            raise serializers.ValidationError({"entries": "يجب إضافة صف واحد على الأقل في الجدول"})
+        return attrs
+
+    def create(self, validated_data):
+        class_ids = validated_data.pop("classIds", [])
+        schedule = Schedule.objects.create(**validated_data)
+        if class_ids:
+            schedule.school_classes.set(class_ids)
+        return schedule
+
+    def update(self, instance, validated_data):
+        class_ids = validated_data.pop("classIds", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if class_ids is not None:
+            instance.school_classes.set(class_ids)
+        return instance
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["id"] = str(data["id"])
+        data["classIds"] = [str(class_id) for class_id in instance.school_classes.values_list("id", flat=True)]
+        return data
 
 
 class ParentChildSerializer(serializers.Serializer):

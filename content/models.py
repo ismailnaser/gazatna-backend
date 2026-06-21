@@ -233,3 +233,27 @@ class ContactMessage(models.Model):
         ordering = ["-created_at", "-id"]
         verbose_name = "رسالة تواصل"
         verbose_name_plural = "رسائل تواصل معنا"
+
+
+class ScheduleType(models.TextChoices):
+    EXAM = "exam", "جدول الاختبارات"
+    CLASS = "class", "جدول الحصص"
+
+
+class Schedule(models.Model):
+    name = models.CharField(max_length=200)
+    schedule_type = models.CharField(max_length=20, choices=ScheduleType.choices)
+    school_classes = models.ManyToManyField(
+        "academics.SchoolClass",
+        related_name="schedules",
+        blank=True,
+    )
+    entries = models.JSONField(default=list, blank=True)
+    is_published = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-id"]
+        verbose_name = "جدول"
+        verbose_name_plural = "الجداول"

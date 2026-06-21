@@ -7,14 +7,12 @@ from assignments.models import AssignmentStatus, QuestionType
 
 
 def quiz_window_end(quiz, now=None):
-    ends = []
-    if quiz.start_at and quiz.duration_minutes:
-        ends.append(quiz.start_at + timedelta(minutes=quiz.duration_minutes))
+    """Deadline for quiz availability (submission window), not per-attempt duration."""
     if quiz.end_at:
-        ends.append(quiz.end_at)
-    if not ends:
-        return None
-    return min(ends)
+        return quiz.end_at
+    if quiz.start_at and quiz.duration_minutes:
+        return quiz.start_at + timedelta(minutes=quiz.duration_minutes)
+    return None
 
 
 def quiz_is_open(quiz, now=None):
