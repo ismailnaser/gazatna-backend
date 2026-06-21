@@ -183,6 +183,7 @@ class AdmissionStatus(models.TextChoices):
 
 class AdmissionApplication(models.Model):
     student_name = models.CharField(max_length=200)
+    national_id = models.CharField(max_length=20, blank=True, default="")
     birth_date = models.DateField(null=True, blank=True)
     grade = models.CharField(max_length=50)
     parent_name = models.CharField(max_length=200)

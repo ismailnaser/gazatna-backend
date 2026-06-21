@@ -4,6 +4,7 @@ import uuid
 
 from django.db.models import Avg, Count, Max, Sum
 from django.utils import timezone
+from rest_framework.exceptions import ValidationError
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -48,7 +49,7 @@ from assignments.attachment_utils import (
     _file_bytes_list,
 )
 from assignments.services import homework_is_open
-from config.permissions import AdminScopePermission, IsAdmin, IsParent, IsSuperAdmin, IsTeacher
+from config.permissions import AdminClassPermission, AdminScopePermission, IsAdmin, IsParent, IsSuperAdmin, IsTeacher
 from config.serializers import (
     AccreditationSerializer,
     ActivitySerializer,
@@ -76,6 +77,7 @@ from config.serializers import (
     StudentSerializer,
     SubjectGradeSerializer,
     SubjectSerializer,
+    SubjectWriteSerializer,
     TeacherProfileSerializer,
     TeacherWriteSerializer,
     ParentAlertSerializer,
@@ -97,6 +99,11 @@ from content.models import (
 from finance.models import FeePlan, PaymentNotice, PaymentSource, PaymentStatus, StudentFeeBalance
 from finance.services import apply_plan_to_student, apply_plan_to_students, build_fee_status
 from staff.models import TeacherClassAssignment, TeacherProfile, TeacherReadAlert
+from staff.assignment_validation import (
+    class_subject_assignments,
+    school_class_id_for_student,
+    validate_teacher_subject_class_assignments,
+)
 
 
 def _teacher_for_user(user):
@@ -420,7 +427,7 @@ class AdminStudentViewSet(viewsets.ModelViewSet):
 
 
 class AdminClassViewSet(viewsets.ModelViewSet):
-    permission_classes = [AdminScopePermission("academics")]
+    permission_classes = [AdminClassPermission]
     queryset = SchoolClass.objects.all()
 
     def get_serializer_class(self):
@@ -441,6 +448,16 @@ class AdminClassViewSet(viewsets.ModelViewSet):
                 teacher = TeacherProfile.objects.filter(id=teacher_id).first()
                 if not teacher:
                     return Response({"detail": "المعلم غير موجود"}, status=status.HTTP_400_BAD_REQUEST)
+                subject_ids = list(teacher.teaching_subjects.values_list("id", flat=True))
+                try:
+                    validate_teacher_subject_class_assignments(teacher, subject_ids, [school_class.id])
+                except ValidationError as exc:
+                    detail = exc.detail
+                    if isinstance(detail, dict):
+                        message = detail.get("detail", detail)
+                    else:
+                        message = detail
+                    return Response({"detail": message}, status=status.HTTP_400_BAD_REQUEST)
                 school_class.homeroom_teacher = teacher
                 school_class.save(update_fields=["homeroom_teacher"])
                 TeacherClassAssignment.objects.get_or_create(teacher=teacher, school_class=school_class)
@@ -452,6 +469,11 @@ class AdminClassViewSet(viewsets.ModelViewSet):
                 "students": StudentSerializer(students, many=True, context={"request": request}).data,
             }
         )
+
+    def perform_destroy(self, instance):
+        grade_level = instance.grade_level
+        instance.delete()
+        _sync_grade_sections_count(grade_level)
 
 
 SECTION_LABELS = ["أ", "ب", "ج", "د", "هـ", "و", "ز", "ح", "ط", "ي", "ك", "ل", "م", "ن", "س", "ع", "ف", "ص", "ق", "ر"]
@@ -483,12 +505,22 @@ def _sync_grade_sections(grade: Grade):
                 name=f"{grade.name} - {sec}",
             )
 
-    # Remove extra sections if safe
+    # Remove extra sections (students are unlinked via SET_NULL on school_class)
     for cls in existing:
         if cls.section and cls.section not in desired_sections:
-            if cls.students.filter(is_active=True).exists():
-                raise ValueError(f"لا يمكن تقليل الشعب لأن شعبة {cls.section} تحتوي طلاباً")
             cls.delete()
+
+
+def _sync_grade_sections_count(grade_name: str):
+    grade = Grade.objects.filter(name=grade_name).first()
+    if not grade:
+        return
+    remaining = SchoolClass.objects.filter(grade_level=grade_name).count()
+    if remaining == 0:
+        grade.delete()
+    elif remaining != grade.sections_count:
+        grade.sections_count = remaining
+        grade.save(update_fields=["sections_count"])
 
 
 class AdminGradeViewSet(viewsets.ModelViewSet):
@@ -525,30 +557,18 @@ class AdminGradeViewSet(viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         grade = self.get_object()
-        classes = SchoolClass.objects.filter(grade_level=grade.name)
-        if Student.objects.filter(school_class__in=classes, is_active=True).exists():
-            return Response(
-                {"detail": "لا يمكن حذف فصل مرتبط بطلاب"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        classes.delete()
+        SchoolClass.objects.filter(grade_level=grade.name).delete()
         return super().destroy(request, *args, **kwargs)
 
 
 class AdminSubjectViewSet(viewsets.ModelViewSet):
     permission_classes = [AdminScopePermission("academics")]
-    serializer_class = SubjectSerializer
-    queryset = Subject.objects.all()
+    queryset = Subject.objects.prefetch_related("class_assignments").all()
 
-    def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
-        if instance.teachers.exists():
-            return Response(
-                {"detail": "لا يمكن حذف مادة مسندة لمعلمين"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        return super().destroy(request, *args, **kwargs)
-
+    def get_serializer_class(self):
+        if self.action in ("create", "update", "partial_update"):
+            return SubjectWriteSerializer
+        return SubjectSerializer
 
 class AdminTeacherViewSet(viewsets.ModelViewSet):
     permission_classes = [AdminScopePermission("staff")]
@@ -1062,6 +1082,7 @@ class TeacherClassDetailView(APIView):
             result.append({
                 "id": str(student.id),
                 "name": student.name,
+                "nationalId": student.national_id or "",
                 "grade": float(entry.score) if entry and entry.score is not None else "",
                 "note": entry.note if entry else "",
             })
@@ -2605,63 +2626,77 @@ class ParentSubjectsView(APIView):
 
     def get(self, request):
         child = _child_for_parent(request.user)
-        if not child or not child.school_class_id:
+        if not child:
+            return Response([])
+
+        class_id = school_class_id_for_student(child)
+        if not class_id:
             return Response([])
 
         grouped: dict[str, dict] = {}
-        homework = Homework.objects.filter(school_class_id=child.school_class_id).only(
+        for row in class_subject_assignments(class_id):
+            grouped[row["subject"]] = {
+                "subject": row["subject"],
+                "teacherName": row["teacherName"],
+                "homeworkCount": 0,
+                "quizCount": 0,
+                "announcementCount": 0,
+                "materialCount": 0,
+                "latestAt": None,
+            }
+
+        homework = Homework.objects.filter(school_class_id=class_id).only(
             "subject", "created_at"
         )
-        quizzes = Quiz.objects.filter(school_class_id=child.school_class_id).only(
+        quizzes = Quiz.objects.filter(school_class_id=class_id).only(
             "subject", "created_at"
         )
         announcements = SubjectAnnouncement.objects.filter(
-            school_class_id=child.school_class_id
+            school_class_id=class_id
         ).only("subject", "created_at")
         materials = SubjectMaterial.objects.filter(
-            school_class_id=child.school_class_id
+            school_class_id=class_id
         ).only("subject", "created_at")
 
         def touch_row(subject: str, created_at):
-            return grouped.setdefault(
-                subject,
-                {
-                    "subject": subject,
-                    "homeworkCount": 0,
-                    "quizCount": 0,
-                    "announcementCount": 0,
-                    "materialCount": 0,
-                    "latestAt": created_at,
-                },
-            )
+            if subject in grouped:
+                row = grouped[subject]
+            else:
+                row = grouped.setdefault(
+                    subject,
+                    {
+                        "subject": subject,
+                        "teacherName": "",
+                        "homeworkCount": 0,
+                        "quizCount": 0,
+                        "announcementCount": 0,
+                        "materialCount": 0,
+                        "latestAt": created_at,
+                    },
+                )
+            if row["latestAt"] is None or created_at > row["latestAt"]:
+                row["latestAt"] = created_at
+            return row
 
         for hw in homework:
             subject = _subject_label(hw.subject)
             row = touch_row(subject, hw.created_at)
             row["homeworkCount"] += 1
-            if hw.created_at > row["latestAt"]:
-                row["latestAt"] = hw.created_at
 
         for quiz in quizzes:
             subject = _subject_label(quiz.subject)
             row = touch_row(subject, quiz.created_at)
             row["quizCount"] += 1
-            if quiz.created_at > row["latestAt"]:
-                row["latestAt"] = quiz.created_at
 
         for ann in announcements:
             subject = _subject_label(ann.subject)
             row = touch_row(subject, ann.created_at)
             row["announcementCount"] += 1
-            if ann.created_at > row["latestAt"]:
-                row["latestAt"] = ann.created_at
 
         for mat in materials:
             subject = _subject_label(mat.subject)
             row = touch_row(subject, mat.created_at)
             row["materialCount"] += 1
-            if mat.created_at > row["latestAt"]:
-                row["latestAt"] = mat.created_at
 
         result = []
         for row in grouped.values():
@@ -2673,7 +2708,7 @@ class ParentSubjectsView(APIView):
             )
             row["latestAt"] = row["latestAt"].isoformat() if row["latestAt"] else None
             result.append(row)
-        result.sort(key=lambda r: r["latestAt"] or "", reverse=True)
+        result.sort(key=lambda r: (r["subject"]))
         return Response(result)
 
 
@@ -3011,7 +3046,7 @@ class PublicSiteSettingsView(APIView):
 
 
 class AdminSiteSettingsView(APIView):
-    permission_classes = [AdminScopePermission("content")]
+    permission_classes = [IsSuperAdmin]
 
     def get(self, request):
         s = SiteSettings.get()
@@ -3088,6 +3123,7 @@ class PublicAdmissionApplicationView(APIView):
         email = str(data.get("email", "")).strip()
         notes = str(data.get("notes", "")).strip()
         birth_date_raw = str(data.get("birthDate", "")).strip()
+        national_id = str(data.get("nationalId", "")).strip()
 
         if not student_name or not parent_name or not grade or not phone:
             return Response({"detail": "يرجى تعبئة الحقول المطلوبة"}, status=status.HTTP_400_BAD_REQUEST)
@@ -3101,6 +3137,7 @@ class PublicAdmissionApplicationView(APIView):
 
         app = AdmissionApplication.objects.create(
             student_name=student_name,
+            national_id=national_id,
             parent_name=parent_name,
             grade=grade,
             phone=phone,
@@ -3123,6 +3160,7 @@ class AdminAdmissionApplicationsView(APIView):
             {
                 "id": str(a.id),
                 "studentName": a.student_name,
+                "nationalId": a.national_id or "",
                 "birthDate": str(a.birth_date) if a.birth_date else None,
                 "grade": a.grade,
                 "parentName": a.parent_name,
@@ -3160,6 +3198,7 @@ class AdminApproveAdmissionView(APIView):
         serializer = StudentSerializer(
             data={
                 "name": app.student_name,
+                "nationalId": app.national_id or "",
                 "classId": class_id,
                 "is_active": True,
             },
@@ -3326,6 +3365,7 @@ class AdminBlockedStudentsView(APIView):
                 "id": str(student.id),
                 "name": student.name,
                 "studentNumber": student.student_number,
+                "nationalId": student.national_id or "",
                 "grade": student.grade_level,
                 "section": student.section or "",
                 "requiredAmount": due,
@@ -3349,6 +3389,7 @@ class AdminInactiveStudentsView(APIView):
                 "id": str(s.id),
                 "name": s.name,
                 "studentNumber": s.student_number,
+                "nationalId": s.national_id or "",
                 "grade": s.grade_level,
                 "section": s.section or "",
                 "createdAt": s.created_at.isoformat(),

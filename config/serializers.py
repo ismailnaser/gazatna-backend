@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from academics.models import ClassGradebook, Grade, SchoolClass, Student, StudentDocument, Subject, SubjectGrade
+from academics.models import ClassGradebook, ClassSubjectAssignment, Grade, SchoolClass, Student, StudentDocument, Subject, SubjectGrade
 from assignments.models import Homework, HomeworkSubmission, QuestionType, Quiz, QuizQuestion, QuizSubmission, SubjectAnnouncement, SubjectMaterial
 from content.models import (
     Accreditation,
@@ -14,6 +14,7 @@ from content.models import (
 )
 from finance.models import FeeInstallment, FeePlan, PaymentNotice, PaymentStatus, StudentFeeBalance
 from staff.models import TeacherClassAssignment, TeacherProfile
+from staff.assignment_validation import teacher_class_ids, validate_teacher_subject_class_assignments
 from accounts.models import User
 from accounts.utils import create_auto_user, next_numeric_username
 
@@ -102,13 +103,17 @@ class GradeSerializer(serializers.ModelSerializer):
 
 class SubjectSerializer(serializers.ModelSerializer):
     teacherCount = serializers.SerializerMethodField()
+    classIds = serializers.SerializerMethodField()
 
     class Meta:
         model = Subject
-        fields = ["id", "name", "teacherCount"]
+        fields = ["id", "name", "teacherCount", "classIds"]
 
     def get_teacherCount(self, obj):
         return obj.teachers.count()
+
+    def get_classIds(self, obj):
+        return [str(class_id) for class_id in obj.class_assignments.values_list("school_class_id", flat=True)]
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -116,10 +121,48 @@ class SubjectSerializer(serializers.ModelSerializer):
         return data
 
 
+class SubjectWriteSerializer(serializers.ModelSerializer):
+    classIds = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        required=False,
+        allow_empty=True,
+    )
+
+    class Meta:
+        model = Subject
+        fields = ["name", "classIds"]
+
+    def _sync_class_assignments(self, subject, class_ids):
+        ClassSubjectAssignment.objects.filter(subject=subject).delete()
+        for class_id in class_ids:
+            ClassSubjectAssignment.objects.get_or_create(
+                subject=subject,
+                school_class_id=class_id,
+            )
+
+    def create(self, validated_data):
+        class_ids = validated_data.pop("classIds", None)
+        subject = Subject.objects.create(**validated_data)
+        if class_ids is not None:
+            self._sync_class_assignments(subject, class_ids)
+        return subject
+
+    def update(self, instance, validated_data):
+        class_ids = validated_data.pop("classIds", None)
+        instance = super().update(instance, validated_data)
+        if class_ids is not None:
+            self._sync_class_assignments(instance, class_ids)
+        return instance
+
+    def to_representation(self, instance):
+        return SubjectSerializer(instance, context=self.context).data
+
+
 class StudentSerializer(serializers.ModelSerializer):
     grade = serializers.CharField(source="grade_level", required=False)
     section = serializers.CharField(required=False)
     studentNumber = serializers.CharField(source="student_number", required=False)
+    nationalId = serializers.CharField(source="national_id", required=False, allow_blank=True)
     classId = serializers.PrimaryKeyRelatedField(
         source="school_class", queryset=SchoolClass.objects.all(), allow_null=True, required=False
     )
@@ -139,6 +182,7 @@ class StudentSerializer(serializers.ModelSerializer):
             "grade",
             "section",
             "studentNumber",
+            "nationalId",
             "classId",
             "username",
             "generatedPassword",
@@ -262,6 +306,7 @@ class ClassGradebookSerializer(serializers.ModelSerializer):
 class ClassStudentSerializer(serializers.Serializer):
     id = serializers.CharField()
     name = serializers.CharField()
+    nationalId = serializers.CharField(required=False, allow_blank=True)
     grade = serializers.JSONField()
     note = serializers.CharField()
 
@@ -385,6 +430,21 @@ class TeacherWriteSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         if self.instance is None and not attrs.get("teaching_subjects"):
             raise serializers.ValidationError({"subjectIds": "يجب اختيار مادة واحدة على الأقل"})
+
+        subjects = attrs.get("teaching_subjects")
+        if subjects is None and self.instance is not None:
+            subjects = list(self.instance.teaching_subjects.all())
+
+        class_ids = self.initial_data.get("classIds") if hasattr(self, "initial_data") else None
+        if class_ids is None and self.instance is not None:
+            class_ids = list(teacher_class_ids(self.instance))
+        elif class_ids is not None:
+            class_ids = [int(class_id) for class_id in class_ids]
+
+        if subjects is not None and class_ids is not None:
+            subject_ids = [s.id if hasattr(s, "id") else int(s) for s in subjects]
+            validate_teacher_subject_class_assignments(self.instance, subject_ids, class_ids)
+
         return attrs
 
     def _set_classes(self, teacher, class_ids):

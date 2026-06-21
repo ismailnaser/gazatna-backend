@@ -54,9 +54,32 @@ class Subject(models.Model):
         return self.name
 
 
+class ClassSubjectAssignment(models.Model):
+    subject = models.ForeignKey(
+        Subject,
+        on_delete=models.CASCADE,
+        related_name="class_assignments",
+    )
+    school_class = models.ForeignKey(
+        SchoolClass,
+        on_delete=models.CASCADE,
+        related_name="subject_assignments",
+    )
+
+    class Meta:
+        unique_together = [("subject", "school_class")]
+        verbose_name = "إسناد مادة لصف"
+        verbose_name_plural = "إسنادات المواد للصفوف"
+        ordering = ["school_class__name", "subject__name"]
+
+    def __str__(self):
+        return f"{self.subject.name} — {self.school_class.name}"
+
+
 class Student(models.Model):
     name = models.CharField(max_length=200)
     student_number = models.CharField(max_length=50, unique=True)
+    national_id = models.CharField(max_length=20, blank=True, default="")
     grade_level = models.CharField(max_length=50)
     section = models.CharField(max_length=10)
     school_class = models.ForeignKey(

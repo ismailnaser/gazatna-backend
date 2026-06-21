@@ -38,3 +38,16 @@ def AdminScopePermission(*scopes: str):
             return any(role_has_scope(request.user.role, scope) for scope in scopes)
 
     return _Permission
+
+
+class AdminClassPermission(BasePermission):
+    """قراءة الفصول لإدارة الطلاب، والتعديل لإدارة الفصول فقط."""
+
+    def has_permission(self, request, view):
+        if not request.user.is_authenticated:
+            return False
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return role_has_scope(request.user.role, "academics") or role_has_scope(
+                request.user.role, "students"
+            )
+        return role_has_scope(request.user.role, "academics")
