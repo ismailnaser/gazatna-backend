@@ -1,4 +1,5 @@
 from rest_framework import serializers
+import re
 
 from academics.models import ClassGradebook, ClassSubjectAssignment, Grade, SchoolClass, Student, StudentDocument, Subject, SubjectGrade
 from assignments.models import Homework, HomeworkSubmission, QuestionType, Quiz, QuizQuestion, QuizSubmission, SubjectAnnouncement, SubjectMaterial
@@ -224,6 +225,19 @@ class StudentSerializer(serializers.ModelSerializer):
         # Fallback to legacy JSON strings
         legacy = obj.documents or []
         return [{"id": None, "name": str(x), "url": None} for x in legacy]
+
+    def validate_national_id(self, value):
+        value = str(value or "").strip()
+        if not value:
+            raise serializers.ValidationError("رقم الهوية مطلوب")
+        if not re.fullmatch(r"\d{9}", value):
+            raise serializers.ValidationError("رقم الهوية يجب أن يتكون من 9 أرقام")
+        qs = Student.objects.filter(national_id=value)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("رقم الهوية مستخدم مسبقاً لطالب آخر")
+        return value
 
     def validate(self, attrs):
         school_class = attrs.get("school_class")

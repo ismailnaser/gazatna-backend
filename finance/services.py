@@ -182,19 +182,23 @@ def build_installment_notifications(balance, installments, paid):
 
 
 def build_fee_status(student):
-    if not getattr(student, "is_active", True):
-        return {
-            "blocked": False,
-            "fullyPaid": True,
-            "requiredAmount": 0,
-            "message": "",
-            "currentInstallment": None,
-            "installments": [],
-            "notifications": [],
-            "accessOverrideUntil": None,
-        }
+    inactive = not getattr(student, "is_active", True)
 
     if not hasattr(student, "fee_balance"):
+        if inactive:
+            return {
+                "blocked": True,
+                "fullyPaid": True,
+                "requiredAmount": 0,
+                "message": (
+                    "تم إيقاف الوصول إلى حساب الطالب بسبب الرسوم. "
+                    "يرجى مراجعة صفحة المالية أو التواصل مع الإدارة."
+                ),
+                "currentInstallment": None,
+                "installments": [],
+                "notifications": [],
+                "accessOverrideUntil": None,
+            }
         return {
             "blocked": False,
             "fullyPaid": True,
@@ -284,6 +288,11 @@ def build_fee_status(student):
                     f"يجب دفع مبلغ الدفعة رقم {blocking.order} ({int(remaining)} ₪) لاستئناف الوصول — "
                     f"المطلوب لهذه الدفعة: {int(blocking.amount)} ₪ (انتهى الموعد: {blocking.end_date})."
                 )
+        if inactive:
+            message = (
+                "تم إيقاف الوصول إلى حساب الطالب بسبب الرسوم المستحقة. "
+                f"{message}"
+            )
         return {
             "blocked": True,
             "fullyPaid": False,
@@ -299,6 +308,20 @@ def build_fee_status(student):
         (i for i in scheduled if i.start_date <= today <= i.end_date),
         scheduled[-1] if scheduled else None,
     )
+    if inactive:
+        return {
+            "blocked": True,
+            "fullyPaid": balance.fees_paid,
+            "requiredAmount": 0,
+            "message": (
+                "تم إيقاف الوصول إلى حساب الطالب بسبب الرسوم. "
+                "يرجى مراجعة صفحة المالية أو التواصل مع الإدارة."
+            ),
+            "currentInstallment": _serialize_installment(current, paid, installments, today) if current else None,
+            "installments": _serialize_installments(balance, student),
+            "notifications": notifications,
+            "accessOverrideUntil": None,
+        }
     return {
         "blocked": False,
         "fullyPaid": balance.fees_paid,

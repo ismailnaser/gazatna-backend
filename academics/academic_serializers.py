@@ -92,6 +92,11 @@ class AcademicYearWriteSerializer(serializers.ModelSerializer):
         end = attrs.get("end_date")
         if start and end and end < start:
             raise serializers.ValidationError({"endDate": "تاريخ النهاية يجب أن يكون بعد البداية"})
+        name = attrs.get("name")
+        if name is not None:
+            attrs["name"] = str(name).strip()
+            if not attrs["name"]:
+                raise serializers.ValidationError({"name": "اسم السنة الدراسية مطلوب"})
         return attrs
 
     def create(self, validated_data):

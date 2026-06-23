@@ -41,7 +41,7 @@ def AdminScopePermission(*scopes: str):
 
 
 class AdminClassPermission(BasePermission):
-    """قراءة الفصول لإدارة الطلاب، والتعديل لإدارة الفصول فقط."""
+    """قراءة الفصول للإداريين المعنيين، والتعديل للإدارة الكلية فقط."""
 
     def has_permission(self, request, view):
         if not request.user.is_authenticated:
@@ -50,4 +50,17 @@ class AdminClassPermission(BasePermission):
             return role_has_scope(request.user.role, "academics") or role_has_scope(
                 request.user.role, "students"
             )
-        return role_has_scope(request.user.role, "academics")
+        return request.user.role == SUPER_ADMIN_ROLE
+
+
+class AdminGradePermission(BasePermission):
+    """قراءة المراحل لكل الإداريين، والتعديل للإدارة الكلية فقط."""
+
+    def has_permission(self, request, view):
+        if not request.user.is_authenticated:
+            return False
+        if not is_admin_role(request.user.role):
+            return False
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return True
+        return request.user.role == SUPER_ADMIN_ROLE

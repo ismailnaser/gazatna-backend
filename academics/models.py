@@ -104,6 +104,13 @@ class Student(models.Model):
         verbose_name = "طالب"
         verbose_name_plural = "الطلاب"
         ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["national_id"],
+                condition=models.Q(national_id__gt=""),
+                name="academics_student_national_id_unique",
+            ),
+        ]
 
     def __str__(self):
         return self.name

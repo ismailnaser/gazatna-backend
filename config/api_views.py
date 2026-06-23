@@ -1,5 +1,6 @@
 from datetime import date, timedelta
 from decimal import Decimal
+import re
 import uuid
 
 from django.db.models import Avg, Count, Max, Sum
@@ -63,7 +64,15 @@ from assignments.attachment_utils import (
     _file_bytes_list,
 )
 from assignments.services import homework_is_open
-from config.permissions import AdminClassPermission, AdminScopePermission, IsAdmin, IsParent, IsSuperAdmin, IsTeacher
+from config.permissions import (
+    AdminClassPermission,
+    AdminGradePermission,
+    AdminScopePermission,
+    IsAdmin,
+    IsParent,
+    IsSuperAdmin,
+    IsTeacher,
+)
 from config.serializers import (
     AccreditationSerializer,
     ActivitySerializer,
@@ -102,6 +111,7 @@ from content.models import (
     Activity,
     Alumni,
     AdmissionApplication,
+    AdmissionStatus,
     ContactMessage,
     NewsImage,
     NewsItem,
@@ -213,8 +223,20 @@ def _build_grade_chart() -> list[dict]:
     return grade_chart_by_level()
 
 
+def _linked_student_for_parent(user):
+    return (
+        Student.objects.filter(parent=user)
+        .select_related("school_class", "fee_balance")
+        .order_by("-is_active", "-id")
+        .first()
+    )
+
+
 def _child_for_parent(user):
-    return Student.objects.filter(parent=user, is_active=True).select_related("school_class", "fee_balance").first()
+    student = _linked_student_for_parent(user)
+    if student and student.is_active:
+        return student
+    return None
 
 
 def _subject_label(value):
@@ -531,7 +553,7 @@ def _sync_grade_sections_count(grade_name: str):
 
 
 class AdminGradeViewSet(viewsets.ModelViewSet):
-    permission_classes = [AdminScopePermission("academics")]
+    permission_classes = [AdminGradePermission]
     serializer_class = GradeSerializer
     queryset = Grade.objects.prefetch_related("promotion_policy").order_by("sort_order", "id")
 
@@ -2623,10 +2645,21 @@ class ParentStudentView(APIView):
     permission_classes = [IsParent]
 
     def get(self, request):
-        child = _child_for_parent(request.user)
-        if not child:
+        linked = _linked_student_for_parent(request.user)
+        if not linked:
             return Response({"detail": "لا يوجد طالب مرتبط"}, status=status.HTTP_404_NOT_FOUND)
-        return Response(StudentSerializer(child).data)
+
+        fee_status = build_fee_status(linked)
+        payload = StudentSerializer(linked, context={"request": request}).data
+        access_restricted = not linked.is_active or bool(fee_status.get("blocked"))
+        if access_restricted:
+            payload["accessRestricted"] = True
+            payload["accessRestrictionReason"] = "fees"
+            payload["accessRestrictionMessage"] = fee_status.get("message") or (
+                "تم إيقاف الوصول إلى حساب الطالب بسبب الرسوم المستحقة. "
+                "يرجى تسديد المبلغ المطلوب أو زيارة صفحة المالية."
+            )
+        return Response(payload)
 
 
 class ParentGradesView(APIView):
@@ -2732,7 +2765,7 @@ class ParentFeesView(APIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get(self, request):
-        child = _child_for_parent(request.user)
+        child = _linked_student_for_parent(request.user)
         if not child:
             return Response({"student": None, "notices": [], "feeStatus": None})
         notices = PaymentNotice.objects.filter(student=child).order_by("-date", "-id")
@@ -2743,7 +2776,7 @@ class ParentFeesView(APIView):
         })
 
     def post(self, request):
-        child = _child_for_parent(request.user)
+        child = _linked_student_for_parent(request.user)
         if not child:
             return Response({"detail": "لا يوجد طالب مرتبط"}, status=status.HTTP_404_NOT_FOUND)
         amount_raw = request.data.get("amount")
@@ -3358,6 +3391,25 @@ class PublicAdmissionApplicationView(APIView):
         notes = str(data.get("notes", "")).strip()
         birth_date_raw = str(data.get("birthDate", "")).strip()
         national_id = str(data.get("nationalId", "")).strip()
+        if not national_id:
+            return Response({"detail": "رقم الهوية مطلوب"}, status=status.HTTP_400_BAD_REQUEST)
+        if not re.fullmatch(r"\d{9}", national_id):
+            return Response(
+                {"detail": "رقم الهوية يجب أن يتكون من 9 أرقام"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if Student.objects.filter(national_id=national_id).exists():
+            return Response(
+                {"detail": "رقم الهوية مستخدم مسبقاً لطالب مسجّل في المدرسة"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if AdmissionApplication.objects.filter(
+            national_id=national_id, status=AdmissionStatus.PENDING
+        ).exists():
+            return Response(
+                {"detail": "يوجد طلب قبول قيد المراجعة بنفس رقم الهوية"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if not student_name or not parent_name or not grade or not phone:
             return Response({"detail": "يرجى تعبئة الحقول المطلوبة"}, status=status.HTTP_400_BAD_REQUEST)
@@ -3664,6 +3716,81 @@ class ParentSchedulesView(APIView):
         return Response(ScheduleSerializer(qs, many=True).data)
 
 
+WEEK_DAYS_ORDER = [
+    "السبت",
+    "الأحد",
+    "الاثنين",
+    "الثلاثاء",
+    "الأربعاء",
+    "الخميس",
+    "الجمعة",
+]
+
+
+def _normalize_teacher_name(value):
+    return re.sub(r"\s+", " ", (value or "").strip()).casefold()
+
+
+def _school_class_label(school_class):
+    section = school_class.section or ""
+    label = f"{school_class.grade_level} - {section}".strip(" -")
+    return label or school_class.name
+
+
+class TeacherSchedulesView(APIView):
+    permission_classes = [IsTeacher]
+
+    def get(self, request):
+        teacher = _teacher_for_user(request.user)
+        if not teacher:
+            return Response([])
+
+        teacher_name = _normalize_teacher_name(teacher.name)
+        qs = (
+            Schedule.objects.filter(is_published=True, schedule_type="class")
+            .prefetch_related("school_classes")
+            .order_by("-updated_at", "-id")
+        )
+
+        rows = []
+        for schedule in qs:
+            class_labels = [_school_class_label(school_class) for school_class in schedule.school_classes.all()]
+            class_label = " · ".join(class_labels)
+            for index, entry in enumerate(schedule.entries or []):
+                if not isinstance(entry, dict):
+                    continue
+                entry_teacher = _normalize_teacher_name(entry.get("teacher") or "")
+                if not entry_teacher or entry_teacher != teacher_name:
+                    continue
+                subject = (entry.get("subject") or "").strip()
+                if not subject:
+                    continue
+                day = (entry.get("day") or "").strip()
+                time = (entry.get("time") or "").strip()
+                duration = (entry.get("duration") or "").strip() or "60"
+                rows.append(
+                    {
+                        "id": f"{schedule.id}-{index}-{day}-{time}-{subject}",
+                        "scheduleId": str(schedule.id),
+                        "scheduleName": schedule.name,
+                        "day": day,
+                        "time": time,
+                        "duration": duration,
+                        "subject": subject,
+                        "classLabel": class_label,
+                    }
+                )
+
+        def sort_key(row):
+            day_index = (
+                WEEK_DAYS_ORDER.index(row["day"]) if row["day"] in WEEK_DAYS_ORDER else 99
+            )
+            return (day_index, row["time"])
+
+        rows.sort(key=sort_key)
+        return Response(rows)
+
+
 class AcademicContextView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -3682,6 +3809,9 @@ class AdminAcademicYearViewSet(viewsets.ModelViewSet):
         year = self.get_object()
         set_active_academic_year(year)
         return Response(serialize_academic_year(year))
+
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=["post"], url_path="set-current-term")
     def set_current_term(self, request, pk=None):

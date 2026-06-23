@@ -66,6 +66,7 @@ from config.api_views import (
     TeacherMaterialViewSet,
     TeacherProfileView,
     TeacherQuizViewSet,
+    TeacherSchedulesView,
 )
 
 router = DefaultRouter()
@@ -112,6 +113,7 @@ urlpatterns = [
     path("api/admin/notifications/blocked-students/", AdminBlockedStudentsView.as_view()),
     path("api/admin/notifications/inactive-students/", AdminInactiveStudentsView.as_view()),
     path("api/teacher/profile/", TeacherProfileView.as_view()),
+    path("api/teacher/schedules/", TeacherSchedulesView.as_view()),
     path("api/teacher/classes/", TeacherClassesView.as_view()),
     path("api/teacher/classes/<int:class_id>/", TeacherClassDetailView.as_view()),
     path("api/teacher/assessments/", TeacherAssessmentsView.as_view()),
