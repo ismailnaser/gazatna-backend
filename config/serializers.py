@@ -350,6 +350,7 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
     classIds = serializers.SerializerMethodField()
     teachableClassIds = serializers.SerializerMethodField()
     subjectClassIds = serializers.SerializerMethodField()
+    teachingClasses = serializers.SerializerMethodField()
 
     class Meta:
         model = TeacherProfile
@@ -369,6 +370,7 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
             "imageGradient",
             "is_public",
             "classIds",
+            "teachingClasses",
             "teachableClassIds",
             "subjectClassIds",
         ]
@@ -402,9 +404,14 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
         return getattr(obj, "_generated_password", None)
 
     def get_classIds(self, obj):
-        assigned = {a.school_class_id for a in obj.class_assignments.select_related("school_class")}
-        homeroom = set(obj.homeroom_classes.values_list("id", flat=True))
-        return [str(cid) for cid in sorted(assigned | homeroom)]
+        from staff.assignment_validation import teacher_class_ids
+
+        return [str(cid) for cid in sorted(teacher_class_ids(obj))]
+
+    def get_teachingClasses(self, obj):
+        from staff.assignment_validation import teacher_school_classes
+
+        return SchoolClassSerializer(teacher_school_classes(obj), many=True).data
 
     def get_teachableClassIds(self, obj):
         from academics.grade_scheme_services import teacher_teachable_class_ids

@@ -123,7 +123,12 @@ from content.models import (
     SiteSettings,
 )
 from finance.models import FeePlan, PaymentNotice, PaymentSource, PaymentStatus, StudentFeeBalance
-from finance.services import apply_plan_to_student, apply_plan_to_students, build_fee_status
+from finance.services import (
+    apply_plan_to_student,
+    apply_plan_to_students,
+    build_fee_status,
+    restore_student_access_after_fees,
+)
 from staff.models import TeacherClassAssignment, TeacherProfile, TeacherReadAlert
 from staff.assignment_validation import (
     class_subject_assignments,
@@ -234,9 +239,11 @@ def _linked_student_for_parent(user):
 
 def _child_for_parent(user):
     student = _linked_student_for_parent(user)
-    if student and student.is_active:
-        return student
-    return None
+    if not student:
+        return None
+    if build_fee_status(student).get("blocked"):
+        return None
+    return student
 
 
 def _subject_label(value):
@@ -329,7 +336,11 @@ class PublicSchoolValuesView(APIView):
 class PublicTeachersViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [AllowAny]
     serializer_class = TeacherProfileSerializer
-    queryset = TeacherProfile.objects.filter(is_public=True).prefetch_related("teaching_subjects")
+    queryset = TeacherProfile.objects.filter(is_public=True).prefetch_related(
+        "teaching_subjects",
+        "class_assignments",
+        "homeroom_classes",
+    )
 
 
 class AdminUserViewSet(viewsets.ModelViewSet):
@@ -621,7 +632,7 @@ class AdminTeacherViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return TeacherProfile.objects.prefetch_related(
-            "class_assignments", "teaching_subjects"
+            "class_assignments", "teaching_subjects", "homeroom_classes"
         ).all()
 
     def get_serializer_class(self):
@@ -709,6 +720,7 @@ class AdminFinanceViewSet(viewsets.ModelViewSet):
                 balance, _ = StudentFeeBalance.objects.get_or_create(student=notice.student)
                 balance.paid += approve_amount
                 balance.save(update_fields=["paid"])
+                restore_student_access_after_fees(notice.student)
             elif new_status in (PaymentStatus.PENDING, PaymentStatus.REJECTED) and old_status == PaymentStatus.APPROVED:
                 balance, _ = StudentFeeBalance.objects.get_or_create(student=notice.student)
                 balance.paid = max(Decimal("0"), balance.paid - notice.amount)
@@ -791,6 +803,7 @@ class AdminFinanceViewSet(viewsets.ModelViewSet):
         balance, _ = StudentFeeBalance.objects.get_or_create(student=student, defaults={"total": 0, "paid": 0})
         balance.paid += amount
         balance.save(update_fields=["paid"])
+        restore_student_access_after_fees(student)
 
         payload = {
             "id": str(notice.id),
@@ -1081,13 +1094,9 @@ class TeacherClassesView(APIView):
         teacher = _teacher_for_user(request.user)
         if not teacher:
             return Response([])
-        assigned_ids = TeacherClassAssignment.objects.filter(teacher=teacher).values_list(
-            "school_class_id", flat=True
-        )
-        homeroom_ids = SchoolClass.objects.filter(homeroom_teacher=teacher).values_list("id", flat=True)
-        class_ids = set(assigned_ids) | set(homeroom_ids)
-        classes = SchoolClass.objects.filter(id__in=class_ids)
-        return Response(SchoolClassSerializer(classes, many=True).data)
+        from staff.assignment_validation import teacher_school_classes
+
+        return Response(SchoolClassSerializer(teacher_school_classes(teacher), many=True).data)
 
 
 class TeacherProfileView(APIView):
@@ -2649,15 +2658,21 @@ class ParentStudentView(APIView):
         if not linked:
             return Response({"detail": "لا يوجد طالب مرتبط"}, status=status.HTTP_404_NOT_FOUND)
 
-        fee_status = build_fee_status(linked)
+        fee_status = restore_student_access_after_fees(linked)
         payload = StudentSerializer(linked, context={"request": request}).data
-        access_restricted = not linked.is_active or bool(fee_status.get("blocked"))
+        access_restricted = bool(fee_status.get("blocked"))
         if access_restricted:
             payload["accessRestricted"] = True
             payload["accessRestrictionReason"] = "fees"
             payload["accessRestrictionMessage"] = fee_status.get("message") or (
                 "تم إيقاف الوصول إلى حساب الطالب بسبب الرسوم المستحقة. "
                 "يرجى تسديد المبلغ المطلوب أو زيارة صفحة المالية."
+            )
+        elif not linked.is_active:
+            payload["accessRestricted"] = True
+            payload["accessRestrictionReason"] = "inactive"
+            payload["accessRestrictionMessage"] = (
+                "حساب الطالب بانتظار التفعيل من الإدارة. يرجى التواصل مع المدرسة."
             )
         return Response(payload)
 
@@ -2666,14 +2681,32 @@ class ParentGradesView(APIView):
     permission_classes = [IsParent]
 
     def get(self, request):
-        from academics.grade_scheme_services import serialize_parent_subject_grades
+        from academics.grade_scheme_services import (
+            mark_parent_grades_seen,
+            serialize_parent_subject_grades,
+        )
         from academics.academic_services import ensure_default_academic_calendar
 
         child = _child_for_parent(request.user)
         if not child:
             return Response([])
         ensure_default_academic_calendar()
+        mark_parent_grades_seen(request.user, child)
         return Response(serialize_parent_subject_grades(child))
+
+
+class ParentGradesNotificationView(APIView):
+    permission_classes = [IsParent]
+
+    def get(self, request):
+        from academics.grade_scheme_services import get_parent_grades_notification
+        from academics.academic_services import ensure_default_academic_calendar
+
+        child = _child_for_parent(request.user)
+        if not child:
+            return Response({"hasNew": False, "count": 0})
+        ensure_default_academic_calendar()
+        return Response(get_parent_grades_notification(child, request.user))
 
 
 class ParentCertificatesView(APIView):
@@ -2772,7 +2805,7 @@ class ParentFeesView(APIView):
         return Response({
             "student": StudentSerializer(child, context={"request": request}).data,
             "notices": PaymentNoticeSerializer(notices, many=True, context={"request": request}).data,
-            "feeStatus": build_fee_status(child),
+            "feeStatus": restore_student_access_after_fees(child),
         })
 
     def post(self, request):
@@ -3811,6 +3844,12 @@ class AdminAcademicYearViewSet(viewsets.ModelViewSet):
         return Response(serialize_academic_year(year))
 
     def destroy(self, request, *args, **kwargs):
+        year = self.get_object()
+        if year.is_active:
+            return Response(
+                {"detail": "لا يمكن حذف السنة الدراسية النشطة"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=["post"], url_path="set-current-term")
@@ -3822,8 +3861,48 @@ class AdminAcademicYearViewSet(viewsets.ModelViewSet):
         term = AcademicTerm.objects.filter(id=term_id, academic_year=year).first()
         if not term:
             return Response({"detail": "الفصل الدراسي غير موجود"}, status=status.HTTP_404_NOT_FOUND)
-        set_current_academic_term(term)
+        if term.is_closed:
+            return Response({"detail": "لا يمكن تعيين فصل مُغلق كفصل حالي"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            set_current_academic_term(term)
+        except serializers.ValidationError as exc:
+            from rest_framework.exceptions import ValidationError as DRFValidationError
+            raise DRFValidationError(exc.detail)
         return Response(serialize_academic_year(year))
+
+    @action(detail=True, methods=["get"], url_path="term-end-preview")
+    def term_end_preview(self, request, pk=None):
+        from academics.term_end_services import preview_term_end
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+
+        year = self.get_object()
+        term_id = str(request.query_params.get("termId") or "").strip() or None
+        try:
+            return Response(preview_term_end(year, term_id=term_id))
+        except serializers.ValidationError as exc:
+            raise DRFValidationError(exc.detail)
+
+    @action(detail=True, methods=["post"], url_path="execute-term-end")
+    def execute_term_end(self, request, pk=None):
+        from academics.academic_services import serialize_academic_year
+        from academics.term_end_services import execute_term_end
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+
+        year = self.get_object()
+        term_id = str(request.data.get("termId") or "").strip() or None
+        publish_certs = request.data.get("publishCertificates", True)
+        try:
+            result = execute_term_end(
+                year,
+                request.user,
+                term_id=term_id,
+                publish_certs=bool(publish_certs),
+            )
+            year.refresh_from_db()
+            result["academicYear"] = serialize_academic_year(year)
+            return Response(result)
+        except serializers.ValidationError as exc:
+            raise DRFValidationError(exc.detail)
 
     @action(detail=True, methods=["get", "post"], url_path="promotion-preview")
     def promotion_preview(self, request, pk=None):

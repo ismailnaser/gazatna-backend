@@ -143,6 +143,8 @@ def set_active_academic_year(year: AcademicYear):
 
 @transaction.atomic
 def set_current_academic_term(term: AcademicTerm):
+    if term.is_closed:
+        raise serializers.ValidationError({"detail": "لا يمكن تعيين فصل مُغلق كفصل حالي"})
     AcademicTerm.objects.filter(academic_year=term.academic_year).exclude(id=term.id).update(is_current=False)
     term.is_current = True
     term.save(update_fields=["is_current"])
@@ -159,6 +161,8 @@ def serialize_academic_term(term: AcademicTerm):
         "startDate": term.start_date.isoformat(),
         "endDate": term.end_date.isoformat(),
         "isCurrent": term.is_current,
+        "isClosed": term.is_closed,
+        "closedAt": term.closed_at.isoformat() if term.closed_at else None,
     }
 
 

@@ -181,6 +181,19 @@ def build_installment_notifications(balance, installments, paid):
     return notifications
 
 
+def restore_student_access_after_fees(student):
+    """Re-enable student account when fee obligations no longer block access."""
+    from academics.models import Student
+
+    status = build_fee_status(student)
+    if status.get("blocked"):
+        return status
+    if not student.is_active:
+        Student.objects.filter(pk=student.pk, is_active=False).update(is_active=True)
+        student.is_active = True
+    return status
+
+
 def build_fee_status(student):
     inactive = not getattr(student, "is_active", True)
 

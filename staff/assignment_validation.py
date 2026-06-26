@@ -14,6 +14,13 @@ def teacher_class_ids(teacher):
     return assigned | homeroom
 
 
+def teacher_school_classes(teacher):
+    class_ids = teacher_class_ids(teacher)
+    if not class_ids:
+        return SchoolClass.objects.none()
+    return SchoolClass.objects.filter(id__in=class_ids).order_by("grade_level", "section", "id")
+
+
 def subjects_for_school_class(school_class_id):
     """المواد المسندة لفصل معيّن (مباشرة أو عبر المعلمين)."""
     if not school_class_id:

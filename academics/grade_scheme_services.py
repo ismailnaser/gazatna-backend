@@ -7,6 +7,7 @@ from rest_framework import serializers
 from academics.academic_services import get_current_academic_term, require_current_academic_term
 from academics.models import (
     ClassSubjectAssignment,
+    ParentGradesSeenState,
     Student,
     SubjectGrade,
     SubjectGradeScheme,
@@ -531,3 +532,48 @@ def serialize_scheme_entries(scheme, school_class):
             }
         )
     return rows
+
+
+def _scheme_entry_has_scores(entry):
+    if not entry or not isinstance(entry.scores, dict):
+        return False
+    return any(value not in (None, "") for value in entry.scores.values())
+
+
+def get_parent_grades_notification(student, parent):
+    academic_term = get_current_academic_term()
+    if not academic_term:
+        return {"hasNew": False, "count": 0}
+
+    state = ParentGradesSeenState.objects.filter(parent=parent, student=student).first()
+    last_seen = state.last_seen_at if state else None
+    new_subjects: set[str] = set()
+
+    for grade in SubjectGrade.objects.filter(student=student, academic_term=academic_term):
+        if grade.score is None:
+            continue
+        if last_seen is None or grade.updated_at > last_seen:
+            new_subjects.add(grade.subject)
+
+    entries = SubjectGradeSchemeEntry.objects.filter(
+        student=student,
+        scheme__academic_term=academic_term,
+    ).select_related("scheme")
+    for entry in entries:
+        if not _scheme_entry_has_scores(entry):
+            continue
+        if last_seen is None or entry.updated_at > last_seen:
+            new_subjects.add(entry.scheme.subject)
+
+    count = len(new_subjects)
+    return {"hasNew": count > 0, "count": count}
+
+
+def mark_parent_grades_seen(parent, student):
+    from django.utils import timezone
+
+    ParentGradesSeenState.objects.update_or_create(
+        parent=parent,
+        student=student,
+        defaults={"last_seen_at": timezone.now()},
+    )

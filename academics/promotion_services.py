@@ -3,6 +3,7 @@ from datetime import date
 from decimal import Decimal
 
 from django.db import transaction
+from django.utils import timezone
 from rest_framework import serializers
 
 from academics.academic_services import (
@@ -16,6 +17,7 @@ from academics.academic_services import (
 from academics.models import (
     AcademicTerm,
     AcademicYear,
+    CertificateConfig,
     Enrollment,
     Grade,
     PromotionPolicy,
@@ -23,6 +25,7 @@ from academics.models import (
     SubjectGrade,
     YearEndPromotionRun,
 )
+from academics.grade_reset_services import reset_grade_inputs_for_term, strip_subject_details_from_preview_row
 from academics.services import ensure_all_grade_sections, get_next_grade, promote_student_to_next_grade
 
 
@@ -186,8 +189,22 @@ def _serialize_grade_policies():
 
 
 def preview_year_end(year: AcademicYear, overrides=None):
+    from academics.term_end_services import get_term_for_year, is_last_term, ordered_terms, prior_terms_all_closed
+
     if not year.is_active:
         raise serializers.ValidationError({"detail": "المعاينة متاحة للسنة النشطة فقط"})
+
+    current_term = get_term_for_year(year)
+    if not current_term:
+        raise serializers.ValidationError({"detail": "لا يوجد فصل دراسي حالي"})
+
+    if not is_last_term(current_term, year):
+        raise serializers.ValidationError(
+            {"detail": "معاينة نهاية السنة متاحة عند الفصل الأخير فقط. أغلق الفصول السابقة من «نهاية الفصل»."}
+        )
+
+    if not prior_terms_all_closed(current_term, year):
+        raise serializers.ValidationError({"detail": "يجب إغلاق جميع الفصول السابقة قبل نهاية السنة"})
 
     overrides = overrides or {}
     students = Student.objects.filter(is_active=True).select_related("school_class").order_by(
@@ -209,7 +226,7 @@ def preview_year_end(year: AcademicYear, overrides=None):
         row = _serialize_preview_row(student, year, override)
         if row is None:
             continue
-        rows.append(row)
+        rows.append(strip_subject_details_from_preview_row(row))
         if row["yearPassed"]:
             summary["passed"] += 1
         else:
@@ -219,8 +236,11 @@ def preview_year_end(year: AcademicYear, overrides=None):
             summary[action] += 1
 
     return {
+        "scope": "year",
         "academicYearId": str(year.id),
         "academicYearName": year.name,
+        "termId": str(current_term.id) if current_term else None,
+        "termName": current_term.name if current_term else None,
         "gradePolicies": _serialize_grade_policies(),
         "summary": summary,
         "students": rows,
@@ -245,9 +265,21 @@ def _apply_student_action(student, action: str):
 
 
 @transaction.atomic
-def execute_year_end(year: AcademicYear, user, decisions=None, new_year_name=None):
+def execute_year_end(year: AcademicYear, user, decisions=None, new_year_name=None, publish_certs=True):
+    from academics.certificate_services import get_or_create_certificate_config, publish_certificates
+    from academics.term_end_services import get_term_for_year, is_last_term, prior_terms_all_closed
+
     if not year.is_active:
         raise serializers.ValidationError({"detail": "يمكن تنفيذ نهاية السنة للسنة النشطة فقط"})
+
+    current_term = get_term_for_year(year)
+    if not current_term or not is_last_term(current_term, year):
+        raise serializers.ValidationError(
+            {"detail": "تنفيذ نهاية السنة متاح عند الفصل الأخير فقط. أغلق الفصول السابقة من «نهاية الفصل»."}
+        )
+
+    if not prior_terms_all_closed(current_term, year):
+        raise serializers.ValidationError({"detail": "يجب إغلاق جميع الفصول السابقة قبل نهاية السنة"})
 
     if YearEndPromotionRun.objects.filter(
         academic_year=year, status=YearEndPromotionRun.STATUS_EXECUTED
@@ -283,6 +315,19 @@ def execute_year_end(year: AcademicYear, user, decisions=None, new_year_name=Non
         outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
         executed_rows.append({**row, "executedAction": outcome})
 
+    if publish_certs:
+        config = get_or_create_certificate_config(year)
+        if config.issuance_scope != CertificateConfig.SCOPE_YEAR:
+            config.issuance_scope = CertificateConfig.SCOPE_YEAR
+            config.save(update_fields=["issuance_scope"])
+        publish_certificates(year, user)
+
+    if current_term and not current_term.is_closed:
+        current_term.is_closed = True
+        current_term.is_current = False
+        current_term.closed_at = timezone.now()
+        current_term.save(update_fields=["is_closed", "is_current", "closed_at"])
+
     ensure_all_grade_sections()
 
     year.is_active = False
@@ -306,6 +351,7 @@ def execute_year_end(year: AcademicYear, user, decisions=None, new_year_name=Non
     set_active_academic_year(new_year)
     if first_term:
         set_current_academic_term(first_term)
+        reset_grade_inputs_for_term(first_term)
 
     for student in Student.objects.filter(is_active=True).select_related("school_class"):
         if student.school_class_id:

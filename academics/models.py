@@ -156,6 +156,8 @@ class SubjectGrade(models.Model):
         null=True,
         blank=True,
     )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = "درجة مادة"
@@ -229,6 +231,8 @@ class SubjectGradeSchemeEntry(models.Model):
         related_name="grade_scheme_entries",
     )
     scores = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         unique_together = [("scheme", "student")]
@@ -273,6 +277,8 @@ class AcademicTerm(models.Model):
     start_date = models.DateField()
     end_date = models.DateField()
     is_current = models.BooleanField(default=False)
+    is_closed = models.BooleanField(default=False)
+    closed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         verbose_name = "فصل دراسي"
@@ -465,6 +471,28 @@ class CertificateConfig(models.Model):
 
     def __str__(self):
         return f"شهادات {self.academic_year.name}"
+
+
+class ParentGradesSeenState(models.Model):
+    parent = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="grades_seen_states",
+    )
+    student = models.ForeignKey(
+        Student,
+        on_delete=models.CASCADE,
+        related_name="grades_seen_states",
+    )
+    last_seen_at = models.DateTimeField()
+
+    class Meta:
+        unique_together = [("parent", "student")]
+        verbose_name = "آخر مشاهدة لعلامات ولي الأمر"
+        verbose_name_plural = "آخر مشاهدة لعلامات أولياء الأمور"
+
+    def __str__(self):
+        return f"{self.parent_id}: {self.student_id}"
 
 
 class ParentDismissedAlert(models.Model):
