@@ -4,11 +4,7 @@ from academics.models import ClassGradebook, SchoolClass, Student, SubjectGrade
 from accounts.models import User
 from assignments.models import Homework, HomeworkSubmission, Quiz, QuizQuestion, QuizSubmission
 from content.models import (
-    Accreditation,
-    Activity,
-    Alumni,
     NewsItem,
-    Policy,
     Program,
     SchoolStat,
     SchoolValue,
@@ -65,10 +61,6 @@ class Command(BaseCommand):
             SchoolClass,
             NewsItem,
             Program,
-            Activity,
-            Alumni,
-            Policy,
-            Accreditation,
             SchoolStat,
             SchoolValue,
         ]:

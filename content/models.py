@@ -52,51 +52,6 @@ class Program(models.Model):
         verbose_name_plural = "البرامج الدراسية"
 
 
-class Activity(models.Model):
-    title = models.CharField(max_length=200)
-    description = models.TextField()
-    order = models.PositiveSmallIntegerField(default=0)
-
-    class Meta:
-        ordering = ["order"]
-        verbose_name = "نشاط"
-        verbose_name_plural = "الأنشطة"
-
-
-class Alumni(models.Model):
-    name = models.CharField(max_length=200)
-    year = models.CharField(max_length=10)
-    achievement = models.TextField()
-    order = models.PositiveSmallIntegerField(default=0)
-
-    class Meta:
-        ordering = ["order"]
-        verbose_name = "خريج"
-        verbose_name_plural = "الخريجون"
-
-
-class Policy(models.Model):
-    title = models.CharField(max_length=200)
-    text = models.TextField()
-    order = models.PositiveSmallIntegerField(default=0)
-
-    class Meta:
-        ordering = ["order"]
-        verbose_name = "سياسة"
-        verbose_name_plural = "السياسات"
-
-
-class Accreditation(models.Model):
-    name = models.CharField(max_length=200)
-    description = models.CharField(max_length=200)
-    order = models.PositiveSmallIntegerField(default=0)
-
-    class Meta:
-        ordering = ["order"]
-        verbose_name = "اعتماد"
-        verbose_name_plural = "الاعتمادات"
-
-
 class SchoolStat(models.Model):
     key = models.CharField(max_length=50, unique=True)
     label = models.CharField(max_length=100)

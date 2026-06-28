@@ -47,11 +47,7 @@ from config.api_views import (
     ParentSchedulesView,
     ParentStudentView,
     ParentSubmissionsView,
-    PublicAccreditationViewSet,
-    PublicActivityViewSet,
-    PublicAlumniViewSet,
     PublicNewsViewSet,
-    PublicPolicyViewSet,
     PublicProgramViewSet,
     PublicSchoolValuesView,
     PublicStatsView,
@@ -73,10 +69,6 @@ from config.api_views import (
 router = DefaultRouter()
 router.register("content/news", PublicNewsViewSet, basename="public-news")
 router.register("content/programs", PublicProgramViewSet, basename="public-programs")
-router.register("content/activities", PublicActivityViewSet, basename="public-activities")
-router.register("content/alumni", PublicAlumniViewSet, basename="public-alumni")
-router.register("content/policies", PublicPolicyViewSet, basename="public-policies")
-router.register("content/accreditations", PublicAccreditationViewSet, basename="public-accreditations")
 router.register("staff/teachers", PublicTeachersViewSet, basename="public-teachers")
 router.register("admin/students", AdminStudentViewSet, basename="admin-students")
 router.register("admin/academic-years", AdminAcademicYearViewSet, basename="admin-academic-years")

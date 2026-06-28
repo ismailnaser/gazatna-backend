@@ -17,6 +17,7 @@ from academics.models import (
     AcademicTerm,
     AcademicYear,
     ClassGradebook,
+    ClassSubjectAssignment,
     Grade,
     ParentDismissedAlert,
     PromotionPolicy,
@@ -73,10 +74,10 @@ from config.permissions import (
     IsSuperAdmin,
     IsTeacher,
 )
+from config.cache_mixins import CachedAPIViewMixin, CachedReadOnlyViewSetMixin
+from config.events import emit
+from config.jobs import enqueue_job, run_async
 from config.serializers import (
-    AccreditationSerializer,
-    ActivitySerializer,
-    AlumniSerializer,
     ClassGradebookSerializer,
     ClassStudentSerializer,
     FeePlanSerializer,
@@ -86,7 +87,6 @@ from config.serializers import (
     NewsItemSerializer,
     ParentChildSerializer,
     PaymentNoticeSerializer,
-    PolicySerializer,
     ProgramSerializer,
     QuizSerializer,
     QuizSubmissionSerializer,
@@ -107,15 +107,11 @@ from config.serializers import (
     ScheduleSerializer,
 )
 from content.models import (
-    Accreditation,
-    Activity,
-    Alumni,
     AdmissionApplication,
     AdmissionStatus,
     ContactMessage,
     NewsImage,
     NewsItem,
-    Policy,
     Program,
     SchoolStat,
     SchoolValue,
@@ -132,7 +128,10 @@ from finance.services import (
 from staff.models import TeacherClassAssignment, TeacherProfile, TeacherReadAlert
 from staff.assignment_validation import (
     class_subject_assignments,
+    collect_subject_class_conflicts,
+    sync_subject_section_teachers,
     school_class_id_for_student,
+    validate_homeroom_teacher,
     validate_teacher_subject_class_assignments,
 )
 
@@ -283,57 +282,43 @@ def _subject_material_q(subject_label):
     return Q(subject=subject_label)
 
 
-class PublicNewsViewSet(viewsets.ReadOnlyModelViewSet):
+class PublicNewsViewSet(CachedReadOnlyViewSetMixin, viewsets.ReadOnlyModelViewSet):
     permission_classes = [AllowAny]
     serializer_class = NewsItemSerializer
     queryset = NewsItem.objects.filter(is_published=True).prefetch_related("images")
+    cache_prefix = "public:news"
 
 
-class PublicProgramViewSet(viewsets.ReadOnlyModelViewSet):
+class PublicProgramViewSet(CachedReadOnlyViewSetMixin, viewsets.ReadOnlyModelViewSet):
     permission_classes = [AllowAny]
     serializer_class = ProgramSerializer
     queryset = Program.objects.all()
+    cache_prefix = "public:programs"
 
 
-class PublicActivityViewSet(viewsets.ReadOnlyModelViewSet):
+class PublicStatsView(CachedAPIViewMixin, APIView):
     permission_classes = [AllowAny]
-    serializer_class = ActivitySerializer
-    queryset = Activity.objects.all()
-
-
-class PublicAlumniViewSet(viewsets.ReadOnlyModelViewSet):
-    permission_classes = [AllowAny]
-    serializer_class = AlumniSerializer
-    queryset = Alumni.objects.all()
-
-
-class PublicPolicyViewSet(viewsets.ReadOnlyModelViewSet):
-    permission_classes = [AllowAny]
-    serializer_class = PolicySerializer
-    queryset = Policy.objects.all()
-
-
-class PublicAccreditationViewSet(viewsets.ReadOnlyModelViewSet):
-    permission_classes = [AllowAny]
-    serializer_class = AccreditationSerializer
-    queryset = Accreditation.objects.all()
-
-
-class PublicStatsView(APIView):
-    permission_classes = [AllowAny]
+    cache_prefix = "public:stats"
 
     def get(self, request):
-        return Response(SchoolStatSerializer(SchoolStat.objects.all(), many=True).data)
+        return self.get_cached(
+            request,
+            lambda: SchoolStatSerializer(SchoolStat.objects.all(), many=True).data,
+        )
 
 
-class PublicSchoolValuesView(APIView):
+class PublicSchoolValuesView(CachedAPIViewMixin, APIView):
     permission_classes = [AllowAny]
+    cache_prefix = "public:values"
 
     def get(self, request):
-        return Response(SchoolValueSerializer(SchoolValue.objects.all(), many=True).data)
+        return self.get_cached(
+            request,
+            lambda: SchoolValueSerializer(SchoolValue.objects.all(), many=True).data,
+        )
 
 
-class PublicTeachersViewSet(viewsets.ReadOnlyModelViewSet):
+class PublicTeachersViewSet(CachedReadOnlyViewSetMixin, viewsets.ReadOnlyModelViewSet):
     permission_classes = [AllowAny]
     serializer_class = TeacherProfileSerializer
     queryset = TeacherProfile.objects.filter(is_public=True).prefetch_related(
@@ -341,6 +326,7 @@ class PublicTeachersViewSet(viewsets.ReadOnlyModelViewSet):
         "class_assignments",
         "homeroom_classes",
     )
+    cache_prefix = "public:teachers"
 
 
 class AdminUserViewSet(viewsets.ModelViewSet):
@@ -488,9 +474,8 @@ class AdminClassViewSet(viewsets.ModelViewSet):
                 teacher = TeacherProfile.objects.filter(id=teacher_id).first()
                 if not teacher:
                     return Response({"detail": "المعلم غير موجود"}, status=status.HTTP_400_BAD_REQUEST)
-                subject_ids = list(teacher.teaching_subjects.values_list("id", flat=True))
                 try:
-                    validate_teacher_subject_class_assignments(teacher, subject_ids, [school_class.id])
+                    validate_homeroom_teacher(teacher, school_class)
                 except ValidationError as exc:
                     detail = exc.detail
                     if isinstance(detail, dict):
@@ -500,7 +485,6 @@ class AdminClassViewSet(viewsets.ModelViewSet):
                     return Response({"detail": message}, status=status.HTTP_400_BAD_REQUEST)
                 school_class.homeroom_teacher = teacher
                 school_class.save(update_fields=["homeroom_teacher"])
-                TeacherClassAssignment.objects.get_or_create(teacher=teacher, school_class=school_class)
 
         students = Student.objects.filter(school_class=school_class, is_active=True).order_by("name")
         return Response(
@@ -626,9 +610,105 @@ class AdminSubjectViewSet(viewsets.ModelViewSet):
             return SubjectWriteSerializer
         return SubjectSerializer
 
+    @action(detail=True, methods=["post"], url_path="assign-teacher")
+    def assign_teacher(self, request, pk=None):
+        subject = self.get_object()
+        teacher_id = request.data.get("teacherId")
+        if not teacher_id:
+            return Response(
+                {"detail": "يجب اختيار معلم"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            teacher = TeacherProfile.objects.prefetch_related(
+                "teaching_subjects", "class_assignments", "homeroom_classes"
+            ).get(pk=teacher_id)
+        except (TeacherProfile.DoesNotExist, ValueError, TypeError):
+            return Response({"detail": "المعلم غير موجود"}, status=status.HTTP_404_NOT_FOUND)
+
+        current_ids = list(teacher.teaching_subjects.values_list("id", flat=True))
+        already_has_subject = subject.id in current_ids
+
+        requested_class_ids = request.data.get("classIds")
+        if requested_class_ids is not None:
+            class_ids = [int(class_id) for class_id in requested_class_ids if class_id is not None]
+        else:
+            class_ids = []
+
+        assignable_class_ids, conflicts = collect_subject_class_conflicts(
+            teacher, subject.id, class_ids
+        )
+        if class_ids and not assignable_class_ids:
+            return Response(
+                {
+                    "detail": (
+                        conflicts[0]
+                        if len(conflicts) == 1
+                        else "؛ ".join(conflicts)
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not already_has_subject:
+            teacher.teaching_subjects.add(subject)
+        for class_id in assignable_class_ids:
+            TeacherClassAssignment.objects.get_or_create(
+                teacher=teacher, school_class_id=class_id
+            )
+        teacher = TeacherProfile.objects.prefetch_related(
+            "class_assignments", "teaching_subjects", "homeroom_classes"
+        ).get(pk=teacher.pk)
+        data = TeacherProfileSerializer(teacher, context={"request": request}).data
+        data["assignedClassIds"] = [str(class_id) for class_id in assignable_class_ids]
+        data["skippedConflicts"] = conflicts
+        return Response(data)
+
+    @action(detail=True, methods=["post"], url_path="sync-sections")
+    def sync_sections(self, request, pk=None):
+        subject = self.get_object()
+        sections = request.data.get("sections")
+        if not isinstance(sections, list):
+            return Response(
+                {"detail": "صيغة الشعب غير صحيحة"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            affected_teacher_ids = sync_subject_section_teachers(subject, sections)
+        except TeacherProfile.DoesNotExist:
+            return Response({"detail": "المعلم غير موجود"}, status=status.HTTP_404_NOT_FOUND)
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "صيغة الشعب غير صحيحة"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        subject = Subject.objects.prefetch_related("class_assignments").get(pk=subject.pk)
+        teachers = TeacherProfile.objects.filter(id__in=affected_teacher_ids).prefetch_related(
+            "class_assignments", "teaching_subjects", "homeroom_classes"
+        )
+        return Response(
+            {
+                "subject": SubjectSerializer(subject, context={"request": request}).data,
+                "teachers": TeacherProfileSerializer(
+                    teachers, many=True, context={"request": request}
+                ).data,
+            }
+        )
+
+
 class AdminTeacherViewSet(viewsets.ModelViewSet):
     permission_classes = [AdminScopePermission("staff")]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get_permissions(self):
+        if self.action in ("list", "retrieve"):
+            permission_classes = [AdminScopePermission("staff", "academics")]
+        else:
+            permission_classes = [AdminScopePermission("staff")]
+        return [permission() for permission in permission_classes]
 
     def get_queryset(self):
         return TeacherProfile.objects.prefetch_related(
@@ -671,11 +751,11 @@ class AdminFeePlanViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         plan = serializer.save()
-        apply_plan_to_students(plan)
+        run_async(apply_plan_to_students, plan)
 
     def perform_update(self, serializer):
         plan = serializer.save()
-        apply_plan_to_students(plan)
+        run_async(apply_plan_to_students, plan)
 
 
 class AdminFinanceViewSet(viewsets.ModelViewSet):
@@ -825,10 +905,15 @@ class AdminFinanceViewSet(viewsets.ModelViewSet):
         return Response(payload, status=status.HTTP_201_CREATED)
 
 
-class AdminAnalyticsView(APIView):
+class AdminAnalyticsView(CachedAPIViewMixin, APIView):
     permission_classes = [IsAdmin]
+    cache_prefix = "admin:analytics"
+    cache_ttl = 120
 
     def get(self, request):
+        return self.get_cached(request, lambda: self._build_payload())
+
+    def _build_payload(self):
         from academics.analytics_services import average_grade_percent
 
         avg_grade = average_grade_percent()
@@ -888,7 +973,7 @@ class AdminAnalyticsView(APIView):
         grade_chart = _build_grade_chart()
         fees_chart = _build_fees_chart()
 
-        return Response({
+        return {
             "avgGrade": avg_grade,
             "feesCollected": fees_collected,
             "pendingPayments": pending_count,
@@ -900,7 +985,7 @@ class AdminAnalyticsView(APIView):
             "urgentTasks": urgent_tasks,
             "gradeChart": grade_chart,
             "feesChart": fees_chart,
-        })
+        }
 
 
 class AdminAnalyticsDetailsView(APIView):
@@ -3295,12 +3380,12 @@ class ParentSubmissionsView(APIView):
         })
 
 
-class PublicSiteSettingsView(APIView):
+class PublicSiteSettingsView(CachedAPIViewMixin, APIView):
     permission_classes = [AllowAny]
+    cache_prefix = "public:site"
 
     def get(self, request):
-        s = SiteSettings.get()
-        return Response(self._serialize(s))
+        return self.get_cached(request, lambda: self._serialize(SiteSettings.get()))
 
     def _programs(self, s):
         mapping = s.programs_by_grade or {}
@@ -3824,12 +3909,19 @@ class TeacherSchedulesView(APIView):
         return Response(rows)
 
 
-class AcademicContextView(APIView):
+class AcademicContextView(CachedAPIViewMixin, APIView):
     permission_classes = [IsAuthenticated]
+    cache_prefix = "academic:context"
+    cache_ttl = 120
 
     def get(self, request):
-        ensure_default_academic_calendar()
-        return Response(serialize_academic_context())
+        return self.get_cached(
+            request,
+            lambda: (
+                ensure_default_academic_calendar(),
+                serialize_academic_context(),
+            )[1],
+        )
 
 
 class AdminAcademicYearViewSet(viewsets.ModelViewSet):

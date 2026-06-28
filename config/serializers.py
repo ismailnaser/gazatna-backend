@@ -4,11 +4,7 @@ import re
 from academics.models import ClassGradebook, ClassSubjectAssignment, Grade, SchoolClass, Student, StudentDocument, Subject, SubjectGrade
 from assignments.models import Homework, HomeworkSubmission, QuestionType, Quiz, QuizQuestion, QuizSubmission, SubjectAnnouncement, SubjectMaterial
 from content.models import (
-    Accreditation,
-    Activity,
-    Alumni,
     NewsItem,
-    Policy,
     Program,
     Schedule,
     SchoolStat,
@@ -16,7 +12,11 @@ from content.models import (
 )
 from finance.models import FeeInstallment, FeePlan, PaymentNotice, PaymentStatus, StudentFeeBalance
 from staff.models import TeacherClassAssignment, TeacherProfile
-from staff.assignment_validation import teacher_class_ids, validate_teacher_subject_class_assignments
+from staff.assignment_validation import (
+    teacher_class_ids,
+    validate_teacher_subject_class_assignments,
+    sync_teacher_teaching_classes,
+)
 from accounts.models import User
 from accounts.utils import create_auto_user, next_numeric_username
 
@@ -348,9 +348,12 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
     imageUrl = serializers.SerializerMethodField()
     imageGradient = serializers.CharField(source="image_gradient", required=False, allow_blank=True)
     classIds = serializers.SerializerMethodField()
+    teachingClasses = serializers.SerializerMethodField()
     teachableClassIds = serializers.SerializerMethodField()
     subjectClassIds = serializers.SerializerMethodField()
-    teachingClasses = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+    homeroomClassId = serializers.SerializerMethodField()
+    homeroomClassName = serializers.SerializerMethodField()
 
     class Meta:
         model = TeacherProfile
@@ -369,10 +372,13 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
             "imageUrl",
             "imageGradient",
             "is_public",
+            "status",
             "classIds",
             "teachingClasses",
             "teachableClassIds",
             "subjectClassIds",
+            "homeroomClassId",
+            "homeroomClassName",
         ]
         extra_kwargs = {"image": {"write_only": True}}
 
@@ -399,6 +405,19 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
 
     def get_username(self, obj):
         return obj.user.username if obj.user_id else None
+
+    def get_status(self, obj):
+        if obj.user_id:
+            return obj.user.status
+        return User.Status.ACTIVE
+
+    def get_homeroomClassId(self, obj):
+        homeroom_class = obj.homeroom_classes.first()
+        return str(homeroom_class.id) if homeroom_class else None
+
+    def get_homeroomClassName(self, obj):
+        homeroom_class = obj.homeroom_classes.first()
+        return homeroom_class.name if homeroom_class else None
 
     def get_generatedPassword(self, obj):
         return getattr(obj, "_generated_password", None)
@@ -448,6 +467,11 @@ class TeacherWriteSerializer(serializers.ModelSerializer):
     subjects = serializers.SerializerMethodField()
     imageGradient = serializers.CharField(source="image_gradient", required=False, allow_blank=True)
     classIds = serializers.ListField(child=serializers.IntegerField(), write_only=True, required=False)
+    status = serializers.ChoiceField(
+        choices=User.Status.choices,
+        required=False,
+        write_only=True,
+    )
 
     class Meta:
         model = TeacherProfile
@@ -463,6 +487,7 @@ class TeacherWriteSerializer(serializers.ModelSerializer):
             "image",
             "imageGradient",
             "classIds",
+            "status",
         ]
         extra_kwargs = {"image": {"write_only": True}}
 
@@ -493,9 +518,7 @@ class TeacherWriteSerializer(serializers.ModelSerializer):
         return attrs
 
     def _set_classes(self, teacher, class_ids):
-        TeacherClassAssignment.objects.filter(teacher=teacher).delete()
-        for class_id in class_ids or []:
-            TeacherClassAssignment.objects.create(teacher=teacher, school_class_id=class_id)
+        sync_teacher_teaching_classes(teacher, class_ids or [])
 
     def create(self, validated_data):
         validated_data.pop("user", None)
@@ -515,6 +538,7 @@ class TeacherWriteSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         class_ids = validated_data.pop("classIds", None)
         subjects = validated_data.pop("teaching_subjects", None)
+        status = validated_data.pop("status", None)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
@@ -522,6 +546,9 @@ class TeacherWriteSerializer(serializers.ModelSerializer):
             instance.teaching_subjects.set(subjects)
         if class_ids is not None:
             self._set_classes(instance, class_ids)
+        if status is not None and instance.user_id:
+            instance.user.status = status
+            instance.user.save(update_fields=["status"])
         return instance
 
     def to_representation(self, instance):
@@ -1235,54 +1262,6 @@ class ProgramSerializer(serializers.ModelSerializer):
     class Meta:
         model = Program
         fields = ["id", "title", "grades", "desc", "features", "accent"]
-
-    def to_representation(self, instance):
-        data = super().to_representation(instance)
-        data["id"] = str(data["id"])
-        return data
-
-
-class ActivitySerializer(serializers.ModelSerializer):
-    desc = serializers.CharField(source="description")
-
-    class Meta:
-        model = Activity
-        fields = ["id", "title", "desc"]
-
-    def to_representation(self, instance):
-        data = super().to_representation(instance)
-        data["id"] = str(data["id"])
-        return data
-
-
-class AlumniSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Alumni
-        fields = ["id", "name", "year", "achievement"]
-
-    def to_representation(self, instance):
-        data = super().to_representation(instance)
-        data["id"] = str(data["id"])
-        return data
-
-
-class PolicySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Policy
-        fields = ["id", "title", "text"]
-
-    def to_representation(self, instance):
-        data = super().to_representation(instance)
-        data["id"] = str(data["id"])
-        return data
-
-
-class AccreditationSerializer(serializers.ModelSerializer):
-    desc = serializers.CharField(source="description")
-
-    class Meta:
-        model = Accreditation
-        fields = ["id", "name", "desc"]
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
