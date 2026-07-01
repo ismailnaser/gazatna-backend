@@ -14,9 +14,35 @@ class PaymentSource(models.TextChoices):
 
 
 class FeePlan(models.Model):
+    BILLING_FULL_YEAR = "full_year"
+    BILLING_SINGLE_TERM = "single_term"
+    BILLING_PERIOD_CHOICES = [
+        (BILLING_FULL_YEAR, "السنة الدراسية كاملة"),
+        (BILLING_SINGLE_TERM, "فصل دراسي واحد"),
+    ]
+
     name = models.CharField(max_length=120)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
     installments_count = models.PositiveIntegerField(default=1)
+    billing_period = models.CharField(
+        max_length=20,
+        choices=BILLING_PERIOD_CHOICES,
+        default=BILLING_FULL_YEAR,
+    )
+    academic_year = models.ForeignKey(
+        "academics.AcademicYear",
+        on_delete=models.PROTECT,
+        related_name="fee_plans",
+        null=True,
+        blank=True,
+    )
+    academic_term = models.ForeignKey(
+        "academics.AcademicTerm",
+        on_delete=models.PROTECT,
+        related_name="fee_plans",
+        null=True,
+        blank=True,
+    )
     is_active = models.BooleanField(default=True)
     grades = models.ManyToManyField("academics.Grade", related_name="fee_plans", blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

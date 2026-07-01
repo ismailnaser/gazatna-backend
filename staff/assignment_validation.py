@@ -74,14 +74,18 @@ def school_class_id_for_student(student):
 
 def class_subject_assignments(school_class_id):
     """قائمة المواد مع أسماء المعلمين المسندين لكل مادة في الفصل."""
+    from academics.academic_services import get_current_academic_term
+
     if not school_class_id:
         return []
 
+    term = get_current_academic_term()
     grouped: dict[str, dict] = {}
 
-    direct = ClassSubjectAssignment.objects.filter(
-        school_class_id=school_class_id
-    ).select_related("subject")
+    direct_qs = ClassSubjectAssignment.objects.filter(school_class_id=school_class_id)
+    if term:
+        direct_qs = direct_qs.filter(academic_term=term)
+    direct = direct_qs.select_related("subject")
     for row in direct:
         grouped.setdefault(
             row.subject.name,
@@ -262,11 +266,15 @@ def sync_subject_section_teachers(subject, sections):
 
     class_ids = [row["class_id"] for row in normalized]
 
-    ClassSubjectAssignment.objects.filter(subject=subject).delete()
+    from academics.term_operational_services import require_operational_term
+
+    term = require_operational_term()
+    ClassSubjectAssignment.objects.filter(subject=subject, academic_term=term).delete()
     for class_id in class_ids:
         ClassSubjectAssignment.objects.get_or_create(
             subject=subject,
             school_class_id=class_id,
+            academic_term=term,
         )
 
     affected_teacher_ids: set[int] = set()

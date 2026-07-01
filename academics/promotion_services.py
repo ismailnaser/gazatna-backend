@@ -1,5 +1,4 @@
 from collections import defaultdict
-from datetime import date
 from decimal import Decimal
 
 from django.db import transaction
@@ -7,25 +6,21 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from academics.academic_services import (
-    _create_default_terms,
-    _default_year_name,
     get_promotion_policy_for_student,
     serialize_academic_year,
-    set_active_academic_year,
-    set_current_academic_term,
+    term_display_name,
 )
 from academics.models import (
     AcademicTerm,
     AcademicYear,
     CertificateConfig,
-    Enrollment,
     Grade,
     PromotionPolicy,
     Student,
     SubjectGrade,
     YearEndPromotionRun,
 )
-from academics.grade_reset_services import reset_grade_inputs_for_term, strip_subject_details_from_preview_row
+from academics.grade_reset_services import strip_subject_details_from_preview_row
 from academics.services import ensure_all_grade_sections, get_next_grade, promote_student_to_next_grade
 
 
@@ -240,19 +235,11 @@ def preview_year_end(year: AcademicYear, overrides=None):
         "academicYearId": str(year.id),
         "academicYearName": year.name,
         "termId": str(current_term.id) if current_term else None,
-        "termName": current_term.name if current_term else None,
+        "termName": term_display_name(current_term) if current_term else None,
         "gradePolicies": _serialize_grade_policies(),
         "summary": summary,
         "students": rows,
     }
-
-
-def _next_year_name(current: AcademicYear) -> str:
-    parts = current.name.split("-")
-    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-        start = int(parts[1])
-        return f"{start}-{start + 1}"
-    return _default_year_name()
 
 
 def _apply_student_action(student, action: str):
@@ -265,8 +252,8 @@ def _apply_student_action(student, action: str):
 
 
 @transaction.atomic
-def execute_year_end(year: AcademicYear, user, decisions=None, new_year_name=None, publish_certs=True):
-    from academics.certificate_services import get_or_create_certificate_config, publish_certificates
+def execute_year_end(year: AcademicYear, user, decisions=None, publish_certs=True):
+    from academics.certificate_services import publish_year_end_certificates
     from academics.term_end_services import get_term_for_year, is_last_term, prior_terms_all_closed
 
     if not year.is_active:
@@ -316,13 +303,14 @@ def execute_year_end(year: AcademicYear, user, decisions=None, new_year_name=Non
         executed_rows.append({**row, "executedAction": outcome})
 
     if publish_certs:
-        config = get_or_create_certificate_config(year)
-        if config.issuance_scope != CertificateConfig.SCOPE_YEAR:
-            config.issuance_scope = CertificateConfig.SCOPE_YEAR
-            config.save(update_fields=["issuance_scope"])
-        publish_certificates(year, user)
+        from academics.certificate_services import publish_year_end_certificates
+
+        publish_year_end_certificates(year, user)
 
     if current_term and not current_term.is_closed:
+        from academics.term_operational_services import finalize_term_operational_closure
+
+        finalize_term_operational_closure(current_term)
         current_term.is_closed = True
         current_term.is_current = False
         current_term.closed_at = timezone.now()
@@ -334,36 +322,9 @@ def execute_year_end(year: AcademicYear, user, decisions=None, new_year_name=Non
     year.status = AcademicYear.STATUS_ARCHIVED
     year.save(update_fields=["is_active", "status"])
 
-    next_name = (new_year_name or _next_year_name(year)).strip()
-    if AcademicYear.objects.filter(name=next_name).exists():
-        raise serializers.ValidationError({"newYearName": "اسم السنة الجديدة موجود مسبقاً"})
-
-    start_year = int(next_name.split("-")[0])
-    new_year = AcademicYear.objects.create(
-        name=next_name,
-        start_date=date(start_year, 9, 1),
-        end_date=date(start_year + 1, 6, 30),
-        status=AcademicYear.STATUS_ACTIVE,
-        is_active=True,
-    )
-    first_term = _create_default_terms(new_year, mark_first_current=True)
-
-    set_active_academic_year(new_year)
-    if first_term:
-        set_current_academic_term(first_term)
-        reset_grade_inputs_for_term(first_term)
-
-    for student in Student.objects.filter(is_active=True).select_related("school_class"):
-        if student.school_class_id:
-            Enrollment.objects.update_or_create(
-                student=student,
-                academic_year=new_year.name,
-                defaults={"school_class": student.school_class},
-            )
-
     run = YearEndPromotionRun.objects.create(
         academic_year=year,
-        new_academic_year=new_year,
+        new_academic_year=None,
         executed_by=user if getattr(user, "is_authenticated", False) else None,
         status=YearEndPromotionRun.STATUS_EXECUTED,
         summary={"outcomeCounts": outcome_counts, "previewSummary": preview["summary"]},
@@ -373,7 +334,10 @@ def execute_year_end(year: AcademicYear, user, decisions=None, new_year_name=Non
     return {
         "runId": str(run.id),
         "archivedYear": serialize_academic_year(year),
-        "newYear": serialize_academic_year(new_year),
+        "newYear": None,
         "summary": outcome_counts,
         "students": executed_rows,
+        "certificatesPublished": bool(publish_certs),
+        "certificatesPublishedTerm": False,
+        "certificatesPublishedYear": bool(publish_certs),
     }

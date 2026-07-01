@@ -65,9 +65,16 @@ class ClassSubjectAssignment(models.Model):
         on_delete=models.CASCADE,
         related_name="subject_assignments",
     )
+    academic_term = models.ForeignKey(
+        "AcademicTerm",
+        on_delete=models.CASCADE,
+        related_name="class_subject_assignments",
+        null=True,
+        blank=True,
+    )
 
     class Meta:
-        unique_together = [("subject", "school_class")]
+        unique_together = [("subject", "school_class", "academic_term")]
         verbose_name = "إسناد مادة لصف"
         verbose_name_plural = "إسنادات المواد للصفوف"
         ordering = ["school_class__name", "subject__name"]
@@ -109,6 +116,11 @@ class Student(models.Model):
                 fields=["national_id"],
                 condition=models.Q(national_id__gt=""),
                 name="academics_student_national_id_unique",
+            ),
+            models.UniqueConstraint(
+                fields=["parent"],
+                condition=models.Q(parent__isnull=False),
+                name="academics_student_unique_login_account",
             ),
         ]
 
@@ -217,6 +229,28 @@ class SubjectGradeScheme(models.Model):
 
     def __str__(self):
         return f"{self.subject} — {self.school_class.name}"
+
+
+class GradeSchemeTemplate(models.Model):
+    """تقسيمة علامات موحّدة يحددها المشرف لكل الفصول والمواد في الفصل الدراسي."""
+
+    academic_term = models.OneToOneField(
+        "AcademicTerm",
+        on_delete=models.CASCADE,
+        related_name="grade_scheme_template",
+    )
+    max_score = models.DecimalField(max_digits=6, decimal_places=2, default=100)
+    components = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "تقسيمة علامات موحّدة"
+        verbose_name_plural = "تقسيمات العلامات الموحّدة"
+        ordering = ["-updated_at", "-id"]
+
+    def __str__(self):
+        return f"تقسيمة {self.academic_term}"
 
 
 class SubjectGradeSchemeEntry(models.Model):
@@ -370,6 +404,7 @@ class PromotionPolicy(models.Model):
         choices=FAILURE_MODE_CHOICES,
         default=FAIL_MANUAL_REVIEW,
     )
+    is_configured = models.BooleanField(default=False)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -439,6 +474,10 @@ class CertificateConfig(models.Model):
     )
     is_published = models.BooleanField(default=False)
     published_at = models.DateTimeField(null=True, blank=True)
+    is_term_published = models.BooleanField(default=False)
+    term_published_at = models.DateTimeField(null=True, blank=True)
+    is_year_published = models.BooleanField(default=False)
+    year_published_at = models.DateTimeField(null=True, blank=True)
     published_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,

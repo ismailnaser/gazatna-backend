@@ -1,10 +1,80 @@
-from datetime import date
+from datetime import date, timedelta
+import re
 
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
 
 from academics.models import AcademicTerm, AcademicYear, Grade, PromotionPolicy, Student
+
+TERM_ORDINALS = ["الأول", "الثاني", "الثالث", "الرابع", "الخامس", "السادس"]
+_AUTO_TERM_CODE = re.compile(r"^T\d+$", re.I)
+
+
+def term_display_name(term):
+    name = (term.name or "").strip()
+    if not name or _AUTO_TERM_CODE.match(name):
+        ordinal = (
+            TERM_ORDINALS[term.sort_order - 1]
+            if 1 <= term.sort_order <= len(TERM_ORDINALS)
+            else str(term.sort_order)
+        )
+        return f"الفصل {ordinal}"
+    return name
+
+
+def validate_academic_terms(year: AcademicYear, terms_data: list[dict]):
+    """Ensure term dates stay within the academic year and do not overlap."""
+    if not terms_data:
+        raise serializers.ValidationError({"terms": "يجب تحديد فصل دراسي واحد على الأقل"})
+
+    sorted_terms = sorted(terms_data, key=lambda item: item["sortOrder"])
+    year_start = year.start_date
+    year_end = year.end_date
+
+    for item in sorted_terms:
+        name = str(item.get("name") or "الفصل").strip() or "الفصل"
+        start = item["startDate"]
+        end = item["endDate"]
+
+        if end < start:
+            raise serializers.ValidationError(
+                {"terms": f"تاريخ نهاية «{name}» يجب أن يكون بعد تاريخ البداية"}
+            )
+        if start < year_start:
+            raise serializers.ValidationError(
+                {
+                    "terms": (
+                        f"بداية «{name}» يجب أن تكون ضمن السنة الدراسية "
+                        f"({year_start.isoformat()} — {year_end.isoformat()})"
+                    )
+                }
+            )
+        if end > year_end:
+            raise serializers.ValidationError(
+                {
+                    "terms": (
+                        f"نهاية «{name}» يجب أن تكون ضمن السنة الدراسية "
+                        f"({year_start.isoformat()} — {year_end.isoformat()})"
+                    )
+                }
+            )
+
+    for index in range(1, len(sorted_terms)):
+        previous = sorted_terms[index - 1]
+        current = sorted_terms[index]
+        prev_name = str(previous.get("name") or "الفصل السابق").strip() or "الفصل السابق"
+        curr_name = str(current.get("name") or "الفصل").strip() or "الفصل"
+        if current["startDate"] <= previous["endDate"]:
+            next_allowed = previous["endDate"] + timedelta(days=1)
+            raise serializers.ValidationError(
+                {
+                    "terms": (
+                        f"«{curr_name}» يتداخل مع «{prev_name}». "
+                        f"يجب أن يبدأ في {next_allowed.isoformat()} أو بعده."
+                    )
+                }
+            )
 
 
 def get_active_academic_year():
@@ -15,10 +85,51 @@ def get_current_academic_term():
     year = get_active_academic_year()
     if not year:
         return None
-    term = AcademicTerm.objects.filter(academic_year=year, is_current=True).order_by("sort_order").first()
+    term = (
+        AcademicTerm.objects.filter(academic_year=year, is_current=True, is_closed=False)
+        .order_by("sort_order")
+        .first()
+    )
     if term:
         return term
-    return AcademicTerm.objects.filter(academic_year=year).order_by("sort_order").first()
+    return activate_due_academic_term(year)
+
+
+def _all_prior_terms_closed(term: AcademicTerm, ordered_terms) -> bool:
+    for item in ordered_terms:
+        if item.id == term.id:
+            return True
+        if not item.is_closed:
+            return False
+    return True
+
+
+@transaction.atomic
+def activate_due_academic_term(year: AcademicYear | None = None, *, reset_grades=True):
+    """Promote the next open term to current when its start date has arrived."""
+    year = year or get_active_academic_year()
+    if not year:
+        return None
+
+    today = timezone.localdate()
+    ordered_terms = list(year.terms.order_by("sort_order", "id"))
+    for term in ordered_terms:
+        if term.is_closed or term.start_date > today:
+            continue
+        if not _all_prior_terms_closed(term, ordered_terms):
+            continue
+        was_current = term.is_current
+        set_current_academic_term(term)
+        if reset_grades and not was_current:
+            from academics.grade_reset_services import reset_grade_inputs_for_term
+
+            reset_grade_inputs_for_term(term)
+        return term
+    return None
+
+
+def next_term_activates_on_closure(closing_term: AcademicTerm, following_term: AcademicTerm) -> bool:
+    return closing_term.end_date == following_term.start_date
 
 
 def require_current_academic_term():
@@ -67,34 +178,9 @@ def get_promotion_policy_for_student(student: Student) -> PromotionPolicy:
     )
 
 
-@transaction.atomic
 def ensure_default_academic_calendar():
-    year = AcademicYear.objects.filter(is_active=True).first()
-    if year:
-        if not AcademicTerm.objects.filter(academic_year=year).exists():
-            _create_default_terms(year)
-        return year
-
-    existing = AcademicYear.objects.order_by("-start_date").first()
-    if existing:
-        if not existing.is_active and existing.status != AcademicYear.STATUS_ARCHIVED:
-            existing.is_active = True
-            existing.status = AcademicYear.STATUS_ACTIVE
-            existing.save(update_fields=["is_active", "status"])
-        if not AcademicTerm.objects.filter(academic_year=existing).exists():
-            _create_default_terms(existing)
-        return existing
-
-    today = timezone.localdate()
-    year = AcademicYear.objects.create(
-        name=_default_year_name(today),
-        start_date=date(today.year, 9, 1),
-        end_date=date(today.year + 1, 6, 30),
-        status=AcademicYear.STATUS_ACTIVE,
-        is_active=True,
-    )
-    _create_default_terms(year, mark_first_current=True)
-    return year
+    """Return the active academic year if configured; never auto-create calendar data."""
+    return get_active_academic_year()
 
 
 def _default_year_name(today: date | None = None):
@@ -133,12 +219,7 @@ def set_active_academic_year(year: AcademicYear):
     year.is_active = True
     year.status = AcademicYear.STATUS_ACTIVE
     year.save(update_fields=["is_active", "status"])
-    if not AcademicTerm.objects.filter(academic_year=year).exists():
-        _create_default_terms(year, mark_first_current=True)
-    elif not AcademicTerm.objects.filter(academic_year=year, is_current=True).exists():
-        first_term = AcademicTerm.objects.filter(academic_year=year).order_by("sort_order").first()
-        if first_term:
-            set_current_academic_term(first_term)
+    activate_due_academic_term(year)
 
 
 @transaction.atomic
@@ -148,8 +229,6 @@ def set_current_academic_term(term: AcademicTerm):
     AcademicTerm.objects.filter(academic_year=term.academic_year).exclude(id=term.id).update(is_current=False)
     term.is_current = True
     term.save(update_fields=["is_current"])
-    if not term.academic_year.is_active:
-        set_active_academic_year(term.academic_year)
 
 
 def serialize_academic_term(term: AcademicTerm):
@@ -157,6 +236,7 @@ def serialize_academic_term(term: AcademicTerm):
         "id": str(term.id),
         "academicYearId": str(term.academic_year_id),
         "name": term.name,
+        "displayName": term_display_name(term),
         "sortOrder": term.sort_order,
         "startDate": term.start_date.isoformat(),
         "endDate": term.end_date.isoformat(),
@@ -178,6 +258,7 @@ def serialize_promotion_policy(policy: PromotionPolicy):
         "passScoreRatio": float(policy.pass_score_ratio),
         "passPromotionMode": policy.pass_promotion_mode,
         "failHandlingMode": policy.fail_handling_mode,
+        "isConfigured": bool(policy.is_configured),
         "updatedAt": policy.updated_at.isoformat() if policy.updated_at else None,
     }
 
@@ -199,7 +280,7 @@ def serialize_academic_year(year: AcademicYear):
 
 
 def serialize_academic_context():
-    year = get_active_academic_year() or ensure_default_academic_calendar()
+    year = get_active_academic_year()
     term = get_current_academic_term()
     return {
         "academicYear": serialize_academic_year(year) if year else None,

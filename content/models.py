@@ -205,6 +205,13 @@ class Schedule(models.Model):
     )
     entries = models.JSONField(default=list, blank=True)
     is_published = models.BooleanField(default=True)
+    academic_term = models.ForeignKey(
+        "academics.AcademicTerm",
+        on_delete=models.CASCADE,
+        related_name="schedules",
+        null=True,
+        blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

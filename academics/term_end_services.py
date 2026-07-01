@@ -2,11 +2,16 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
 
-from academics.academic_services import set_current_academic_term
-from academics.certificate_services import get_or_create_certificate_config, publish_certificates
-from academics.models import AcademicTerm, AcademicYear, CertificateConfig, Student
+from academics.academic_services import (
+    next_term_activates_on_closure,
+    set_current_academic_term,
+    term_display_name,
+)
+from academics.certificate_services import publish_term_certificates
+from academics.models import AcademicTerm, AcademicYear, Student
 from academics.academic_services import get_promotion_policy_for_student
 from academics.grade_reset_services import reset_grade_inputs_for_term, strip_subject_details_from_preview_row
+from academics.promotion_services import _evaluate_student_for_term, _serialize_grade_policies
 
 
 def ordered_terms(year: AcademicYear):
@@ -111,14 +116,20 @@ def preview_term_end(year: AcademicYear, term_id=None):
 
     following = next_open_term(term, year)
 
+    activates_immediately = bool(
+        following and next_term_activates_on_closure(term, following)
+    )
+
     return {
         "scope": "term",
         "academicYearId": str(year.id),
         "academicYearName": year.name,
         "termId": str(term.id),
-        "termName": term.name,
+        "termName": term_display_name(term),
         "nextTermId": str(following.id) if following else None,
-        "nextTermName": following.name if following else None,
+        "nextTermName": term_display_name(following) if following else None,
+        "nextTermActivatesImmediately": activates_immediately,
+        "nextTermStartDate": following.start_date.isoformat() if following else None,
         "gradePolicies": _serialize_grade_policies(),
         "summary": summary,
         "students": rows,
@@ -139,12 +150,12 @@ def execute_term_end(year: AcademicYear, user, term_id=None, publish_certs=True)
     if not following:
         raise serializers.ValidationError({"detail": "لا يوجد فصل تالٍ للانتقال إليه"})
 
+    from academics.term_operational_services import finalize_term_operational_closure
+
+    finalize_term_operational_closure(term)
+
     if publish_certs:
-        config = get_or_create_certificate_config(year)
-        if config.issuance_scope != CertificateConfig.SCOPE_TERM:
-            config.issuance_scope = CertificateConfig.SCOPE_TERM
-            config.save(update_fields=["issuance_scope"])
-        publish_certificates(year, user, term_id=str(term.id))
+        publish_term_certificates(year, user, term_id=str(term.id))
 
     now = timezone.now()
     term.is_closed = True
@@ -152,21 +163,28 @@ def execute_term_end(year: AcademicYear, user, term_id=None, publish_certs=True)
     term.closed_at = now
     term.save(update_fields=["is_closed", "is_current", "closed_at"])
 
-    set_current_academic_term(following)
-    reset_grade_inputs_for_term(following)
+    next_activated = False
+    if next_term_activates_on_closure(term, following):
+        set_current_academic_term(following)
+        reset_grade_inputs_for_term(following)
+        next_activated = True
 
     return {
         "scope": "term",
         "closedTerm": {
             "id": str(term.id),
-            "name": term.name,
+            "name": term_display_name(term),
             "closedAt": term.closed_at.isoformat() if term.closed_at else None,
         },
         "nextTerm": {
             "id": str(following.id),
-            "name": following.name,
+            "name": term_display_name(following),
+            "activated": next_activated,
+            "startDate": following.start_date.isoformat(),
         },
         "certificatesPublished": bool(publish_certs),
+        "certificatesPublishedTerm": bool(publish_certs),
+        "certificatesPublishedYear": bool(publish_certs),
         "academicYear": None,
         "summary": preview["summary"],
         "students": preview["students"],

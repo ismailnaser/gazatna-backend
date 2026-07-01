@@ -30,6 +30,13 @@ class Homework(models.Model):
     max_score = models.DecimalField(max_digits=5, decimal_places=2, default=100)
     group_id = models.UUIDField(default=uuid.uuid4, db_index=True)
     status = models.CharField(max_length=20, choices=AssignmentStatus.choices, default=AssignmentStatus.ACTIVE)
+    academic_term = models.ForeignKey(
+        "academics.AcademicTerm",
+        on_delete=models.CASCADE,
+        related_name="homework_items",
+        null=True,
+        blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -87,6 +94,13 @@ class Quiz(models.Model):
     max_score = models.DecimalField(max_digits=7, decimal_places=2, default=0)
     group_id = models.UUIDField(default=uuid.uuid4, db_index=True)
     status = models.CharField(max_length=20, choices=AssignmentStatus.choices, default=AssignmentStatus.ACTIVE)
+    academic_term = models.ForeignKey(
+        "academics.AcademicTerm",
+        on_delete=models.CASCADE,
+        related_name="quizzes",
+        null=True,
+        blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -165,6 +179,13 @@ class SubjectAnnouncement(models.Model):
     title = models.CharField(max_length=200)
     body = models.TextField()
     group_id = models.UUIDField(default=uuid.uuid4, db_index=True)
+    academic_term = models.ForeignKey(
+        "academics.AcademicTerm",
+        on_delete=models.CASCADE,
+        related_name="subject_announcements",
+        null=True,
+        blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -196,6 +217,13 @@ class SubjectMaterial(models.Model):
         default=MaterialCategory.RESOURCES,
     )
     group_id = models.UUIDField(default=uuid.uuid4, db_index=True)
+    academic_term = models.ForeignKey(
+        "academics.AcademicTerm",
+        on_delete=models.CASCADE,
+        related_name="subject_materials",
+        null=True,
+        blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

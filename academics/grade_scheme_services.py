@@ -7,6 +7,7 @@ from rest_framework import serializers
 from academics.academic_services import get_current_academic_term, require_current_academic_term
 from academics.models import (
     ClassSubjectAssignment,
+    GradeSchemeTemplate,
     ParentGradesSeenState,
     Student,
     SubjectGrade,
@@ -196,6 +197,95 @@ def sync_subject_grade(scheme, student, total_score):
     )
 
 
+def get_grade_scheme_template(term=None):
+    if term is None:
+        term = require_current_academic_term()
+    if not term:
+        return None
+    return GradeSchemeTemplate.objects.filter(academic_term=term).first()
+
+
+def sync_subject_grade_schemes_from_template(template):
+    SubjectGradeScheme.objects.filter(academic_term=template.academic_term).update(
+        max_score=template.max_score,
+        components=template.components,
+    )
+
+
+@transaction.atomic
+def upsert_grade_scheme_template(max_score, components, term=None):
+    term = term or require_current_academic_term()
+    max_decimal, normalized_components = validate_components_total(components, max_score)
+    template, _ = GradeSchemeTemplate.objects.update_or_create(
+        academic_term=term,
+        defaults={
+            "max_score": max_decimal,
+            "components": normalized_components,
+        },
+    )
+    template.max_score = max_decimal
+    template.components = normalized_components
+    template.save(update_fields=["max_score", "components", "updated_at"])
+    sync_subject_grade_schemes_from_template(template)
+    return template
+
+
+def serialize_grade_scheme_template(template):
+    if not template:
+        return None
+    return {
+        "id": str(template.id),
+        "classId": "",
+        "className": "",
+        "subject": "",
+        "academicTermId": str(template.academic_term_id),
+        "maxScore": float(template.max_score),
+        "components": template.components or [],
+        "updatedAt": template.updated_at.isoformat() if template.updated_at else None,
+        "managedByAdmin": True,
+    }
+
+
+def ensure_teacher_scheme_from_template(teacher, school_class, subject_name, template=None):
+    template = template or get_grade_scheme_template()
+    if not template:
+        return None
+    subject_name = subject_name.strip()
+    if not subject_name:
+        return None
+    assert_teacher_can_manage_scheme(teacher, school_class, subject_name)
+    scheme, created = SubjectGradeScheme.objects.get_or_create(
+        teacher=teacher,
+        school_class=school_class,
+        subject=subject_name,
+        academic_term=template.academic_term,
+        defaults={
+            "max_score": template.max_score,
+            "components": template.components,
+        },
+    )
+    if not created and (
+        scheme.max_score != template.max_score or scheme.components != template.components
+    ):
+        scheme.max_score = template.max_score
+        scheme.components = template.components
+        scheme.save(update_fields=["max_score", "components", "updated_at"])
+    ensure_scheme_entries(scheme)
+    return scheme
+
+
+def ensure_teacher_schemes_for_classes(teacher, school_classes, subject_name, template=None):
+    template = template or get_grade_scheme_template()
+    if not template:
+        return []
+    schemes = []
+    for school_class in school_classes:
+        scheme = ensure_teacher_scheme_from_template(teacher, school_class, subject_name, template)
+        if scheme:
+            schemes.append(scheme)
+    return schemes
+
+
 @transaction.atomic
 def upsert_grade_scheme(teacher, school_class, subject_name, max_score, components):
     assert_teacher_can_manage_scheme(teacher, school_class, subject_name)
@@ -232,16 +322,25 @@ def upsert_grade_schemes(teacher, school_classes, subject_name, max_score, compo
 def save_scheme_entries_multi(teacher, school_classes, subject_name, entries_payload):
     academic_term = require_current_academic_term()
     schemes_by_class_id = {}
+    template = get_grade_scheme_template(academic_term)
     for school_class in school_classes:
-        scheme = SubjectGradeScheme.objects.filter(
-            teacher=teacher,
-            school_class=school_class,
-            subject=subject_name.strip(),
-            academic_term=academic_term,
-        ).first()
+        scheme = None
+        if template:
+            scheme = ensure_teacher_scheme_from_template(
+                teacher, school_class, subject_name, template
+            )
+        if not scheme:
+            scheme = SubjectGradeScheme.objects.filter(
+                teacher=teacher,
+                school_class=school_class,
+                subject=subject_name.strip(),
+                academic_term=academic_term,
+            ).first()
         if not scheme:
             raise serializers.ValidationError(
-                {"detail": f"احفظ تقسيمة العلامات أولاً لشعبة {school_class.name}"}
+                {
+                    "detail": "لم تُعرّف تقسيمة العلامات الموحّدة بعد. تواصل مع الإدارة."
+                }
             )
         schemes_by_class_id[school_class.id] = scheme
 
@@ -380,6 +479,7 @@ def serialize_grade_scheme(scheme):
         "maxScore": float(scheme.max_score),
         "components": scheme.components or [],
         "updatedAt": scheme.updated_at.isoformat() if scheme.updated_at else None,
+        "managedByAdmin": True,
     }
 
 
@@ -452,8 +552,8 @@ def _serialize_subject_for_parent(scheme, entry, grade):
     }
 
 
-def serialize_parent_subject_grades(student):
-    academic_term = get_current_academic_term()
+def serialize_parent_subject_grades(student, academic_term=None):
+    academic_term = academic_term or get_current_academic_term()
     if not academic_term:
         return []
 

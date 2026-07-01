@@ -73,6 +73,13 @@ class PromotionPolicySerializer(serializers.ModelSerializer):
             "failHandlingMode",
         ]
 
+    def update(self, instance, validated_data):
+        for key, value in validated_data.items():
+            setattr(instance, key, value)
+        instance.is_configured = True
+        instance.save()
+        return instance
+
     def to_representation(self, instance):
         return serialize_promotion_policy(instance)
 
@@ -104,10 +111,6 @@ class AcademicYearWriteSerializer(serializers.ModelSerializer):
         year = AcademicYear.objects.create(**validated_data)
         if terms_data:
             self._sync_terms(year, terms_data)
-        else:
-            from academics.academic_services import _create_default_terms
-
-            _create_default_terms(year, mark_first_current=True)
         return year
 
     def update(self, instance, validated_data):
@@ -120,6 +123,9 @@ class AcademicYearWriteSerializer(serializers.ModelSerializer):
         return instance
 
     def _sync_terms(self, year, terms_data):
+        from academics.academic_services import validate_academic_terms
+
+        validate_academic_terms(year, terms_data)
         kept_ids = []
         for item in terms_data:
             term_id = str(item.get("id") or "").strip()

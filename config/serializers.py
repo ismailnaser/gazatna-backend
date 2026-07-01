@@ -1,7 +1,7 @@
 from rest_framework import serializers
 import re
 
-from academics.models import ClassGradebook, ClassSubjectAssignment, Grade, SchoolClass, Student, StudentDocument, Subject, SubjectGrade
+from academics.models import AcademicTerm, AcademicYear, ClassGradebook, ClassSubjectAssignment, Grade, SchoolClass, Student, StudentDocument, Subject, SubjectGrade
 from assignments.models import Homework, HomeworkSubmission, QuestionType, Quiz, QuizQuestion, QuizSubmission, SubjectAnnouncement, SubjectMaterial
 from content.models import (
     NewsItem,
@@ -11,6 +11,11 @@ from content.models import (
     SchoolValue,
 )
 from finance.models import FeeInstallment, FeePlan, PaymentNotice, PaymentStatus, StudentFeeBalance
+from finance.fee_plan_validation import resolve_period_bounds, validate_installment_schedule
+from content.schedule_validation import (
+    validate_class_schedule_teacher_conflicts,
+    validate_unique_class_schedule_classes,
+)
 from staff.models import TeacherClassAssignment, TeacherProfile
 from staff.assignment_validation import (
     teacher_class_ids,
@@ -144,11 +149,15 @@ class SubjectWriteSerializer(serializers.ModelSerializer):
         fields = ["name", "classIds"]
 
     def _sync_class_assignments(self, subject, class_ids):
-        ClassSubjectAssignment.objects.filter(subject=subject).delete()
+        from academics.term_operational_services import require_operational_term
+
+        term = require_operational_term()
+        ClassSubjectAssignment.objects.filter(subject=subject, academic_term=term).delete()
         for class_id in class_ids:
             ClassSubjectAssignment.objects.get_or_create(
                 subject=subject,
                 school_class_id=class_id,
+                academic_term=term,
             )
 
     def create(self, validated_data):
@@ -1137,6 +1146,23 @@ class FeePlanSerializer(serializers.ModelSerializer):
     installmentsCount = serializers.IntegerField(source="installments_count")
     totalAmount = serializers.DecimalField(source="total_amount", max_digits=10, decimal_places=2)
     isActive = serializers.BooleanField(source="is_active", required=False, default=True)
+    billingPeriod = serializers.ChoiceField(
+        source="billing_period",
+        choices=[choice[0] for choice in FeePlan.BILLING_PERIOD_CHOICES],
+        default=FeePlan.BILLING_FULL_YEAR,
+    )
+    academicYearId = serializers.PrimaryKeyRelatedField(
+        source="academic_year",
+        queryset=AcademicYear.objects.all(),
+        allow_null=True,
+        required=False,
+    )
+    academicTermId = serializers.PrimaryKeyRelatedField(
+        source="academic_term",
+        queryset=AcademicTerm.objects.all(),
+        allow_null=True,
+        required=False,
+    )
     gradeNames = serializers.SerializerMethodField()
     installments = FeeInstallmentSerializer(many=True)
 
@@ -1147,6 +1173,9 @@ class FeePlanSerializer(serializers.ModelSerializer):
             "name",
             "totalAmount",
             "installmentsCount",
+            "billingPeriod",
+            "academicYearId",
+            "academicTermId",
             "isActive",
             "gradeIds",
             "gradeNames",
@@ -1156,7 +1185,57 @@ class FeePlanSerializer(serializers.ModelSerializer):
     def get_gradeNames(self, obj):
         return list(obj.grades.values_list("name", flat=True))
 
+    def validate(self, attrs):
+        billing_period = attrs.get(
+            "billing_period",
+            getattr(self.instance, "billing_period", FeePlan.BILLING_FULL_YEAR),
+        )
+        academic_year = attrs.get("academic_year") or getattr(self.instance, "academic_year", None)
+        academic_term = attrs.get("academic_term") if "academic_term" in attrs else getattr(
+            self.instance, "academic_term", None
+        )
+
+        if billing_period == FeePlan.BILLING_SINGLE_TERM and not academic_term:
+            raise serializers.ValidationError(
+                {"academicTermId": "اختر الفصل الدراسي عند تحديد خطة لفصل واحد"}
+            )
+
+        if academic_term and academic_year and academic_term.academic_year_id != academic_year.id:
+            raise serializers.ValidationError(
+                {"academicTermId": "الفصل المحدد لا ينتمي للسنة الدراسية المختارة"}
+            )
+
+        grades = attrs.get("grades")
+        if grades is None and self.instance is not None:
+            grades = list(self.instance.grades.all())
+        if grades:
+            plan_id = self.instance.pk if self.instance else None
+            for grade in grades:
+                conflict = (
+                    FeePlan.objects.filter(grades=grade)
+                    .exclude(pk=plan_id)
+                    .values_list("name", flat=True)
+                    .first()
+                )
+                if conflict:
+                    raise serializers.ValidationError(
+                        {
+                            "gradeIds": (
+                                f"المرحلة «{grade.name}» مضافة مسبقاً في خطة «{conflict}». "
+                                "لا يمكن إنشاء أكثر من خطة لنفس المرحلة."
+                            )
+                        }
+                    )
+
+        return attrs
+
     def _save_installments(self, plan, installments_data):
+        period_start, period_end = resolve_period_bounds(
+            plan.billing_period,
+            plan.academic_year,
+            plan.academic_term,
+        )
+        validate_installment_schedule(installments_data, period_start, period_end)
         plan.installments.all().delete()
         for row in installments_data:
             FeeInstallment.objects.create(
@@ -1193,6 +1272,8 @@ class FeePlanSerializer(serializers.ModelSerializer):
         data["id"] = str(data["id"])
         data["totalAmount"] = float(data["totalAmount"])
         data["gradeIds"] = [str(gid) for gid in data["gradeIds"]]
+        data["academicYearId"] = str(data["academicYearId"]) if data.get("academicYearId") else None
+        data["academicTermId"] = str(data["academicTermId"]) if data.get("academicTermId") else None
         return data
 
 
@@ -1349,11 +1430,49 @@ class ScheduleSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"entries": "يجب إضافة صف واحد على الأقل في الجدول"})
         if self.instance is None and entries is None:
             raise serializers.ValidationError({"entries": "يجب إضافة صف واحد على الأقل في الجدول"})
+
+        schedule_type = attrs.get("schedule_type") or (
+            self.instance.schedule_type if self.instance else None
+        )
+        from academics.academic_services import get_current_academic_term
+
+        operational_term = (
+            self.instance.academic_term if self.instance and self.instance.academic_term_id else None
+        ) or get_current_academic_term()
+
+        if schedule_type == "class" and class_ids:
+            class_conflict = validate_unique_class_schedule_classes(
+                class_ids,
+                instance=self.instance,
+                academic_term=operational_term,
+            )
+            if class_conflict:
+                raise serializers.ValidationError({"classIds": class_conflict})
+
+        if schedule_type == "class" and entries is not None:
+            other_schedules = Schedule.objects.filter(
+                schedule_type="class",
+                is_published=True,
+            )
+            if operational_term is not None:
+                other_schedules = other_schedules.filter(academic_term=operational_term)
+            if self.instance is not None:
+                other_schedules = other_schedules.exclude(pk=self.instance.pk)
+            other_entries_lists = list(other_schedules.values_list("entries", flat=True))
+            teacher_conflict = validate_class_schedule_teacher_conflicts(
+                entries,
+                other_entries_lists=other_entries_lists,
+            )
+            if teacher_conflict:
+                raise serializers.ValidationError({"entries": teacher_conflict})
+
         return attrs
 
     def create(self, validated_data):
+        from academics.term_operational_services import require_operational_term
+
         class_ids = validated_data.pop("classIds", [])
-        schedule = Schedule.objects.create(**validated_data)
+        schedule = Schedule.objects.create(**validated_data, academic_term=require_operational_term())
         if class_ids:
             schedule.school_classes.set(class_ids)
         return schedule

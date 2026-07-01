@@ -31,7 +31,6 @@ from academics.models import (
 )
 from academics.academic_serializers import AcademicYearWriteSerializer, PromotionPolicySerializer
 from academics.academic_services import (
-    ensure_default_academic_calendar,
     require_current_academic_term,
     serialize_academic_context,
     serialize_academic_year,
@@ -138,6 +137,18 @@ from staff.assignment_validation import (
 
 def _teacher_for_user(user):
     return TeacherProfile.objects.filter(user=user).first()
+
+
+def _operational_term():
+    from academics.term_operational_services import require_operational_term
+
+    return require_operational_term()
+
+
+def _scope_operational_term(qs):
+    from academics.term_operational_services import scope_to_current_term
+
+    return scope_to_current_term(qs)
 
 
 def _parse_class_ids(data):
@@ -574,6 +585,20 @@ class AdminGradeViewSet(viewsets.ModelViewSet):
         serializer = PromotionPolicySerializer(policy, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        grade.refresh_from_db()
+        return Response(GradeSerializer(grade).data)
+
+    @action(detail=True, methods=["delete"], url_path="promotion-policy")
+    def reset_promotion_policy(self, request, pk=None):
+        from academics.academic_services import _default_promotion_policy_fields, get_promotion_policy_for_grade
+
+        grade = self.get_object()
+        policy = get_promotion_policy_for_grade(grade)
+        for key, value in _default_promotion_policy_fields().items():
+            setattr(policy, key, value)
+        policy.evaluation_term = None
+        policy.is_configured = False
+        policy.save()
         grade.refresh_from_db()
         return Response(GradeSerializer(grade).data)
 
@@ -1248,8 +1273,10 @@ class TeacherHomeworkViewSet(viewsets.ModelViewSet):
         teacher = _teacher_for_user(self.request.user)
         if not teacher:
             return Homework.objects.none()
-        qs = Homework.objects.filter(teacher=teacher).select_related("school_class", "teacher").prefetch_related(
-            "attachment_files"
+        qs = _scope_operational_term(
+            Homework.objects.filter(teacher=teacher).select_related("school_class", "teacher").prefetch_related(
+                "attachment_files"
+            )
         )
         class_id = self.request.query_params.get("classId")
         if class_id:
@@ -1313,6 +1340,7 @@ class TeacherHomeworkViewSet(viewsets.ModelViewSet):
                     school_class_id=class_id,
                     teacher=teacher,
                     group_id=batch_group_id,
+                    academic_term=_operational_term(),
                     **fields,
                 )
                 if file_items:
@@ -1444,6 +1472,7 @@ class TeacherHomeworkViewSet(viewsets.ModelViewSet):
                     school_class_id=class_id,
                     teacher=teacher,
                     group_id=group_id,
+                    academic_term=_operational_term(),
                     **base_fields,
                 )
                 copy_attachments_from_homework(instance, hw)
@@ -1499,6 +1528,48 @@ class TeacherHomeworkViewSet(viewsets.ModelViewSet):
                 submission,
                 context={"request": request, "hide_grades_from_student": False},
             ).data
+        )
+
+
+class AdminGradeSchemeTemplateView(APIView):
+    permission_classes = [AdminScopePermission("academics")]
+
+    def get(self, request):
+        from academics.academic_services import serialize_academic_context
+        from academics.grade_scheme_services import (
+            get_grade_scheme_template,
+            serialize_grade_scheme_template,
+        )
+
+        template = get_grade_scheme_template()
+        return Response(
+            {
+                "scheme": serialize_grade_scheme_template(template),
+                "academicContext": serialize_academic_context(),
+            }
+        )
+
+    def put(self, request):
+        from academics.academic_services import serialize_academic_context
+        from academics.grade_scheme_services import (
+            normalize_components,
+            serialize_grade_scheme_template,
+            upsert_grade_scheme_template,
+        )
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+
+        components = normalize_components(request.data.get("components") or [])
+        max_score = request.data.get("maxScore", 100)
+        try:
+            template = upsert_grade_scheme_template(max_score, components)
+        except serializers.ValidationError as exc:
+            raise DRFValidationError(exc.detail)
+
+        return Response(
+            {
+                "scheme": serialize_grade_scheme_template(template),
+                "academicContext": serialize_academic_context(),
+            }
         )
 
 
@@ -1605,14 +1676,16 @@ class TeacherGradeSchemeView(APIView):
 
     def get(self, request):
         from academics.grade_scheme_services import (
+            ensure_teacher_schemes_for_classes,
+            get_grade_scheme_template,
             pick_representative_scheme,
             serialize_entries_for_classes,
             serialize_grade_scheme,
+            serialize_grade_scheme_template,
             teacher_subjects_for_classes,
         )
-        from academics.academic_services import ensure_default_academic_calendar, serialize_academic_context
+        from academics.academic_services import serialize_academic_context
 
-        ensure_default_academic_calendar()
         teacher = _teacher_for_user(request.user)
         if not teacher:
             return Response({"detail": "غير مصرح"}, status=status.HTTP_403_FORBIDDEN)
@@ -1636,9 +1709,12 @@ class TeacherGradeSchemeView(APIView):
 
         school_classes = self._school_classes_for_teacher(teacher, class_ids)
         available_subjects = teacher_subjects_for_classes(teacher, school_classes)
+        template = get_grade_scheme_template()
 
         schemes = []
-        if subject:
+        if subject and template:
+            schemes = ensure_teacher_schemes_for_classes(teacher, school_classes, subject, template)
+        elif subject:
             academic_term = require_current_academic_term()
             for school_class in school_classes:
                 scheme = (
@@ -1654,10 +1730,16 @@ class TeacherGradeSchemeView(APIView):
                 schemes.append(scheme)
 
         representative = pick_representative_scheme(schemes)
+        if representative:
+            scheme_payload = serialize_grade_scheme(representative)
+        elif template:
+            scheme_payload = serialize_grade_scheme_template(template)
+        else:
+            scheme_payload = None
         return Response(
             {
                 "availableSubjects": available_subjects,
-                "scheme": serialize_grade_scheme(representative) if representative else None,
+                "scheme": scheme_payload,
                 "entries": serialize_entries_for_classes(teacher, school_classes, subject),
                 "classIds": [str(school_class.id) for school_class in school_classes],
                 "subjects": [subject] if subject else [],
@@ -1666,46 +1748,9 @@ class TeacherGradeSchemeView(APIView):
         )
 
     def put(self, request):
-        from academics.academic_services import serialize_academic_context
-        from academics.grade_scheme_services import (
-            normalize_components,
-            serialize_entries_for_classes,
-            serialize_grade_scheme,
-            upsert_grade_schemes_for_subjects,
-        )
-        from rest_framework.exceptions import ValidationError as DRFValidationError
-
-        teacher = _teacher_for_user(request.user)
-        if not teacher:
-            return Response({"detail": "غير مصرح"}, status=status.HTTP_403_FORBIDDEN)
-
-        class_ids = self._parse_class_ids(request.data.get("classIds"), request.data.get("classId"))
-        subjects = self._parse_subjects(request.data.get("subjects"), request.data.get("subject"))
-        if not class_ids or not subjects:
-            raise ValidationError({"detail": "اختر الفصول والمواد"})
-
-        school_classes = self._school_classes_for_teacher(teacher, class_ids)
-        components = normalize_components(request.data.get("components") or [])
-        max_score = request.data.get("maxScore", 100)
-
-        try:
-            schemes = upsert_grade_schemes_for_subjects(
-                teacher, school_classes, subjects, max_score, components
-            )
-        except serializers.ValidationError as exc:
-            raise DRFValidationError(exc.detail)
-
-        primary = schemes[0]
-        primary = SubjectGradeScheme.objects.select_related("school_class").get(pk=primary.pk)
-        active_subject = subjects[0]
         return Response(
-            {
-                "scheme": serialize_grade_scheme(primary),
-                "entries": serialize_entries_for_classes(teacher, school_classes, active_subject),
-                "classIds": [str(school_class.id) for school_class in school_classes],
-                "subjects": subjects,
-                "academicContext": serialize_academic_context(),
-            }
+            {"detail": "تقسيمة العلامات تُدار من قبل الإدارة فقط"},
+            status=status.HTTP_403_FORBIDDEN,
         )
 
     def patch(self, request):
@@ -1848,7 +1893,7 @@ class TeacherQuizViewSet(viewsets.ModelViewSet):
         teacher = _teacher_for_user(self.request.user)
         if not teacher:
             return Quiz.objects.none()
-        qs = (
+        qs = _scope_operational_term(
             Quiz.objects.filter(teacher=teacher)
             .select_related("school_class", "teacher")
             .prefetch_related("questions")
@@ -1988,6 +2033,7 @@ class TeacherQuizViewSet(viewsets.ModelViewSet):
                     school_class_id=class_id,
                     teacher=teacher,
                     group_id=batch_group_id,
+                    academic_term=_operational_term(),
                     **fields,
                 )
                 self._save_questions(quiz, questions_data)
@@ -2120,6 +2166,7 @@ class TeacherQuizViewSet(viewsets.ModelViewSet):
                     school_class_id=class_id,
                     teacher=teacher,
                     group_id=group_id,
+                    academic_term=_operational_term(),
                     **base_fields,
                 )
                 if questions_data is not None:
@@ -2277,8 +2324,10 @@ class TeacherAnnouncementViewSet(viewsets.ModelViewSet):
         teacher = _teacher_for_user(self.request.user)
         if not teacher:
             return SubjectAnnouncement.objects.none()
-        qs = SubjectAnnouncement.objects.filter(teacher=teacher).select_related(
-            "school_class", "teacher"
+        qs = _scope_operational_term(
+            SubjectAnnouncement.objects.filter(teacher=teacher).select_related(
+                "school_class", "teacher"
+            )
         )
         class_id = self.request.query_params.get("classId")
         if class_id:
@@ -2314,6 +2363,7 @@ class TeacherAnnouncementViewSet(viewsets.ModelViewSet):
                     school_class_id=class_id,
                     teacher=teacher,
                     group_id=batch_group_id,
+                    academic_term=_operational_term(),
                     **fields,
                 )
                 created.append(item)
@@ -2387,6 +2437,7 @@ class TeacherAnnouncementViewSet(viewsets.ModelViewSet):
                     school_class_id=class_id,
                     teacher=teacher,
                     group_id=group_id,
+                    academic_term=_operational_term(),
                     **base_fields,
                 )
 
@@ -2407,9 +2458,11 @@ class TeacherMaterialViewSet(viewsets.ModelViewSet):
         teacher = _teacher_for_user(self.request.user)
         if not teacher:
             return SubjectMaterial.objects.none()
-        qs = SubjectMaterial.objects.filter(teacher=teacher).select_related(
-            "school_class", "teacher"
-        ).prefetch_related("files")
+        qs = _scope_operational_term(
+            SubjectMaterial.objects.filter(teacher=teacher).select_related(
+                "school_class", "teacher"
+            ).prefetch_related("files")
+        )
         class_id = self.request.query_params.get("classId")
         if class_id:
             qs = qs.filter(school_class_id=class_id)
@@ -2451,6 +2504,7 @@ class TeacherMaterialViewSet(viewsets.ModelViewSet):
                     school_class_id=class_id,
                     teacher=teacher,
                     group_id=batch_group_id,
+                    academic_term=_operational_term(),
                     **fields,
                 )
                 add_attachments_to_material(item, file_items)
@@ -2555,6 +2609,7 @@ class TeacherMaterialViewSet(viewsets.ModelViewSet):
                     school_class_id=class_id,
                     teacher=teacher,
                     group_id=group_id,
+                    academic_term=_operational_term(),
                     **base_fields,
                 )
                 copy_attachments_from_material(instance, created)
@@ -2621,7 +2676,7 @@ class ParentAlertsView(APIView):
                 "type": "grade",
             })
 
-        pending_hw = (
+        pending_hw = _scope_operational_term(
             Homework.objects.filter(school_class=child.school_class)
             .exclude(id__in=HomeworkSubmission.objects.filter(student=child).values_list("homework_id", flat=True))
             .select_related("teacher", "school_class")
@@ -2641,7 +2696,9 @@ class ParentAlertsView(APIView):
 
         from assignments.quiz_services import quiz_is_open
 
-        open_quizzes = Quiz.objects.filter(school_class=child.school_class).order_by("-created_at")
+        open_quizzes = _scope_operational_term(
+            Quiz.objects.filter(school_class=child.school_class).order_by("-created_at")
+        )
         for quiz in open_quizzes:
             if not quiz_is_open(quiz):
                 continue
@@ -2659,7 +2716,7 @@ class ParentAlertsView(APIView):
             })
 
         recent_cutoff = timezone.now() - timedelta(days=30)
-        announcements = (
+        announcements = _scope_operational_term(
             SubjectAnnouncement.objects.filter(
                 school_class=child.school_class,
                 created_at__gte=recent_cutoff,
@@ -2677,7 +2734,7 @@ class ParentAlertsView(APIView):
                 "subject": subject,
             })
 
-        materials = (
+        materials = _scope_operational_term(
             SubjectMaterial.objects.filter(
                 school_class=child.school_class,
                 created_at__gte=recent_cutoff,
@@ -2770,12 +2827,10 @@ class ParentGradesView(APIView):
             mark_parent_grades_seen,
             serialize_parent_subject_grades,
         )
-        from academics.academic_services import ensure_default_academic_calendar
 
         child = _child_for_parent(request.user)
         if not child:
             return Response([])
-        ensure_default_academic_calendar()
         mark_parent_grades_seen(request.user, child)
         return Response(serialize_parent_subject_grades(child))
 
@@ -2785,12 +2840,10 @@ class ParentGradesNotificationView(APIView):
 
     def get(self, request):
         from academics.grade_scheme_services import get_parent_grades_notification
-        from academics.academic_services import ensure_default_academic_calendar
 
         child = _child_for_parent(request.user)
         if not child:
             return Response({"hasNew": False, "count": 0})
-        ensure_default_academic_calendar()
         return Response(get_parent_grades_notification(child, request.user))
 
 
@@ -2798,15 +2851,12 @@ class ParentCertificatesView(APIView):
     permission_classes = [IsParent]
 
     def get(self, request):
-        from academics.academic_services import ensure_default_academic_calendar
-        from academics.certificate_services import active_certificate_config, serialize_parent_certificates
+        from academics.certificate_services import serialize_parent_current_certificates
 
         child = _child_for_parent(request.user)
         if not child:
             return Response({"published": False, "message": "لا يوجد طالب مرتبط", "certificate": None})
-        ensure_default_academic_calendar()
-        config = active_certificate_config()
-        return Response(serialize_parent_certificates(child, config))
+        return Response(serialize_parent_current_certificates(child))
 
 
 class ParentAssessmentsView(APIView):
@@ -2819,15 +2869,17 @@ class ParentAssessmentsView(APIView):
 
         items = []
 
-        hw_subs = (
-            HomeworkSubmission.objects.filter(
-                student=child,
-                homework__grades_visible=True,
-                score__isnull=False,
-            )
-            .select_related("homework")
-            .order_by("-graded_at", "-submitted_at")
+        from academics.academic_services import get_current_academic_term
+
+        current_term = get_current_academic_term()
+        hw_subs = HomeworkSubmission.objects.filter(
+            student=child,
+            homework__grades_visible=True,
+            score__isnull=False,
         )
+        if current_term:
+            hw_subs = hw_subs.filter(homework__academic_term=current_term)
+        hw_subs = hw_subs.select_related("homework").order_by("-graded_at", "-submitted_at")
         for sub in hw_subs:
             at = sub.graded_at or sub.submitted_at
             items.append(
@@ -2844,11 +2896,11 @@ class ParentAssessmentsView(APIView):
                 }
             )
 
-        quiz_subs = (
-            QuizSubmission.objects.filter(student=child, quiz__grades_visible=True)
-            .select_related("quiz")
-            .prefetch_related("quiz__questions")
-            .order_by("-score", "-attempt_number")
+        quiz_subs = QuizSubmission.objects.filter(student=child, quiz__grades_visible=True)
+        if current_term:
+            quiz_subs = quiz_subs.filter(quiz__academic_term=current_term)
+        quiz_subs = quiz_subs.select_related("quiz").prefetch_related("quiz__questions").order_by(
+            "-score", "-attempt_number"
         )
         from assignments.quiz_services import quiz_submission_fully_graded
 
@@ -2928,7 +2980,7 @@ class ParentHomeworkView(APIView):
         child = _child_for_parent(request.user)
         if not child or not child.school_class_id:
             return Response([])
-        homework = (
+        homework = _scope_operational_term(
             Homework.objects.filter(school_class_id=child.school_class_id)
             .select_related("teacher", "school_class")
             .prefetch_related("attachment_files")
@@ -2985,7 +3037,7 @@ class ParentHomeworkBySubjectView(APIView):
         if not child or not child.school_class_id:
             return Response([])
 
-        homework = (
+        homework = _scope_operational_term(
             Homework.objects.filter(school_class_id=child.school_class_id)
             .select_related("teacher", "school_class")
             .order_by("subject", "-created_at")
@@ -3030,18 +3082,18 @@ class ParentSubjectsView(APIView):
                 "latestAt": None,
             }
 
-        homework = Homework.objects.filter(school_class_id=class_id).only(
-            "subject", "created_at"
+        homework = _scope_operational_term(
+            Homework.objects.filter(school_class_id=class_id).only("subject", "created_at")
         )
-        quizzes = Quiz.objects.filter(school_class_id=class_id).only(
-            "subject", "created_at"
+        quizzes = _scope_operational_term(
+            Quiz.objects.filter(school_class_id=class_id).only("subject", "created_at")
         )
-        announcements = SubjectAnnouncement.objects.filter(
-            school_class_id=class_id
-        ).only("subject", "created_at")
-        materials = SubjectMaterial.objects.filter(
-            school_class_id=class_id
-        ).only("subject", "created_at")
+        announcements = _scope_operational_term(
+            SubjectAnnouncement.objects.filter(school_class_id=class_id).only("subject", "created_at")
+        )
+        materials = _scope_operational_term(
+            SubjectMaterial.objects.filter(school_class_id=class_id).only("subject", "created_at")
+        )
 
         def touch_row(subject: str, created_at):
             if subject in grouped:
@@ -3106,26 +3158,26 @@ class ParentSubjectDetailView(APIView):
             return Response({"subject": subject, "items": []})
 
         subject_label = _subject_label(subject)
-        homework = (
+        homework = _scope_operational_term(
             Homework.objects.filter(school_class_id=child.school_class_id)
             .filter(_subject_homework_q(subject_label))
             .select_related("teacher", "school_class")
             .order_by("-created_at")
         )
-        quizzes = (
+        quizzes = _scope_operational_term(
             Quiz.objects.filter(school_class_id=child.school_class_id)
             .filter(_subject_quiz_q(subject_label))
             .select_related("teacher")
             .prefetch_related("questions")
             .order_by("-created_at")
         )
-        announcements = (
+        announcements = _scope_operational_term(
             SubjectAnnouncement.objects.filter(school_class_id=child.school_class_id)
             .filter(_subject_announcement_q(subject_label))
             .select_related("teacher", "school_class")
             .order_by("-created_at")
         )
-        materials = (
+        materials = _scope_operational_term(
             SubjectMaterial.objects.filter(school_class_id=child.school_class_id)
             .filter(_subject_material_q(subject_label))
             .select_related("teacher", "school_class")
@@ -3814,7 +3866,56 @@ class AdminScheduleViewSet(viewsets.ModelViewSet):
         schedule_type = (self.request.query_params.get("type") or "").strip()
         if schedule_type in ("exam", "class"):
             qs = qs.filter(schedule_type=schedule_type)
-        return qs
+
+        scope = (self.request.query_params.get("scope") or "current").strip().lower()
+        if scope == "previous":
+            from academics.schedule_rollover_services import get_previous_operational_term
+
+            previous_term = get_previous_operational_term()
+            if not previous_term:
+                return qs.none()
+            return qs.filter(academic_term=previous_term)
+        return _scope_operational_term(qs)
+
+    @action(detail=False, methods=["get"], url_path="rollover-context")
+    def rollover_context(self, request):
+        from academics.schedule_rollover_services import serialize_schedule_rollover_context
+
+        schedule_type = (request.query_params.get("type") or "").strip()
+        if schedule_type not in ("exam", "class"):
+            schedule_type = None
+        return Response(serialize_schedule_rollover_context(schedule_type))
+
+    @action(detail=False, methods=["post"], url_path="adopt")
+    def adopt(self, request):
+        from academics.schedule_rollover_services import adopt_schedules, normalize_schedule_rollover_mode
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+
+        schedule_type = str(request.data.get("scheduleType") or "class").strip()
+        if schedule_type not in ("exam", "class"):
+            raise DRFValidationError({"scheduleType": "نوع الجدول غير صالح"})
+
+        raw_class_ids = request.data.get("classIds") or []
+        if not isinstance(raw_class_ids, list):
+            raw_class_ids = [raw_class_ids]
+        class_ids = [int(class_id) for class_id in raw_class_ids if str(class_id).strip()]
+
+        mode = normalize_schedule_rollover_mode(request.data.get("mode"))
+        try:
+            results = adopt_schedules(class_ids, schedule_type, mode)
+        except serializers.ValidationError as exc:
+            raise DRFValidationError(exc.detail)
+
+        from config.serializers import ScheduleSerializer
+
+        created_ids = [item["scheduleId"] for item in results if item.get("scheduleId")]
+        created_schedules = Schedule.objects.filter(id__in=created_ids).prefetch_related("school_classes")
+        return Response(
+            {
+                "results": results,
+                "schedules": ScheduleSerializer(created_schedules, many=True).data,
+            }
+        )
 
 
 class ParentSchedulesView(APIView):
@@ -3826,7 +3927,7 @@ class ParentSchedulesView(APIView):
             return Response([])
 
         schedule_type = (request.query_params.get("type") or "").strip()
-        qs = Schedule.objects.filter(is_published=True).prefetch_related("school_classes")
+        qs = _scope_operational_term(Schedule.objects.filter(is_published=True).prefetch_related("school_classes"))
         if schedule_type in ("exam", "class"):
             qs = qs.filter(schedule_type=schedule_type)
 
@@ -3864,7 +3965,7 @@ class TeacherSchedulesView(APIView):
             return Response([])
 
         teacher_name = _normalize_teacher_name(teacher.name)
-        qs = (
+        qs = _scope_operational_term(
             Schedule.objects.filter(is_published=True, schedule_type="class")
             .prefetch_related("school_classes")
             .order_by("-updated_at", "-id")
@@ -3884,6 +3985,7 @@ class TeacherSchedulesView(APIView):
                 if not subject:
                     continue
                 day = (entry.get("day") or "").strip()
+                period = (entry.get("period") or "").strip()
                 time = (entry.get("time") or "").strip()
                 duration = (entry.get("duration") or "").strip() or "60"
                 rows.append(
@@ -3892,6 +3994,7 @@ class TeacherSchedulesView(APIView):
                         "scheduleId": str(schedule.id),
                         "scheduleName": schedule.name,
                         "day": day,
+                        "period": period,
                         "time": time,
                         "duration": duration,
                         "subject": subject,
@@ -3915,19 +4018,21 @@ class AcademicContextView(CachedAPIViewMixin, APIView):
     cache_ttl = 120
 
     def get(self, request):
-        return self.get_cached(
-            request,
-            lambda: (
-                ensure_default_academic_calendar(),
-                serialize_academic_context(),
-            )[1],
-        )
+        return self.get_cached(request, serialize_academic_context)
 
 
 class AdminAcademicYearViewSet(viewsets.ModelViewSet):
     permission_classes = [AdminScopePermission("academics")]
     serializer_class = AcademicYearWriteSerializer
     queryset = AcademicYear.objects.prefetch_related("terms").all()
+
+    def get_object(self):
+        from rest_framework.exceptions import NotFound
+
+        try:
+            return super().get_object()
+        except NotFound as exc:
+            raise NotFound("السنة الدراسية غير موجودة. حدّث الصفحة وحاول مرة أخرى.") from exc
 
     @action(detail=True, methods=["post"], url_path="set-active")
     def set_active(self, request, pk=None):
@@ -4023,7 +4128,7 @@ class AdminAcademicYearViewSet(viewsets.ModelViewSet):
                 year,
                 request.user,
                 decisions=request.data.get("decisions"),
-                new_year_name=request.data.get("newYearName"),
+                publish_certs=bool(request.data.get("publishCertificates", True)),
             )
         except serializers.ValidationError as exc:
             raise DRFValidationError(exc.detail)
@@ -4086,3 +4191,100 @@ class AdminAcademicYearViewSet(viewsets.ModelViewSet):
             return Response(preview_certificates(year, overrides=overrides or None))
         except serializers.ValidationError as exc:
             raise DRFValidationError(exc.detail)
+
+
+class ParentArchiveView(APIView):
+    permission_classes = [IsParent]
+
+    def get(self, request):
+        from academics.archive_services import serialize_parent_archive_overview
+
+        child = _child_for_parent(request.user)
+        if not child:
+            return Response({"years": []})
+        return Response({"years": serialize_parent_archive_overview(child)})
+
+
+class ParentArchiveTermGradesView(APIView):
+    permission_classes = [IsParent]
+
+    def get(self, request, term_id):
+        from academics.archive_services import serialize_parent_archive_term_grades
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+
+        child = _child_for_parent(request.user)
+        if not child:
+            return Response([])
+        term = AcademicTerm.objects.select_related("academic_year").filter(id=term_id).first()
+        if not term:
+            return Response({"detail": "الفصل غير موجود"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            return Response(serialize_parent_archive_term_grades(child, term))
+        except serializers.ValidationError as exc:
+            raise DRFValidationError(exc.detail)
+
+
+class ParentArchiveCertificatesView(APIView):
+    permission_classes = [IsParent]
+
+    def get(self, request):
+        from academics.certificate_services import serialize_parent_archived_certificates
+
+        child = _child_for_parent(request.user)
+        if not child:
+            return Response(
+                {
+                    "published": False,
+                    "message": "لا يوجد طالب مرتبط",
+                    "config": None,
+                    "certificate": None,
+                    "certificates": [],
+                }
+            )
+        return Response(serialize_parent_archived_certificates(child))
+
+
+class TeacherArchiveView(APIView):
+    permission_classes = [IsTeacher]
+
+    def get(self, request):
+        from academics.archive_services import serialize_teacher_archive_overview
+
+        teacher = _teacher_for_user(request.user)
+        if not teacher:
+            return Response({"years": []})
+        return Response({"years": serialize_teacher_archive_overview(teacher)})
+
+
+class TeacherArchiveTermClassesView(APIView):
+    permission_classes = [IsTeacher]
+
+    def get(self, request, term_id):
+        from academics.archive_services import serialize_teacher_archive_term_classes
+
+        teacher = _teacher_for_user(request.user)
+        if not teacher:
+            return Response([])
+        term = AcademicTerm.objects.select_related("academic_year").filter(id=term_id).first()
+        if not term:
+            return Response({"detail": "الفصل غير موجود"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(serialize_teacher_archive_term_classes(teacher, term))
+
+
+class TeacherArchiveClassGradesView(APIView):
+    permission_classes = [IsTeacher]
+
+    def get(self, request, term_id, class_id):
+        from academics.archive_services import serialize_teacher_archive_class_grades
+
+        teacher = _teacher_for_user(request.user)
+        if not teacher:
+            return Response({"subjects": [], "students": []})
+        term = AcademicTerm.objects.select_related("academic_year").filter(id=term_id).first()
+        school_class = SchoolClass.objects.filter(id=class_id).first()
+        if not term or not school_class:
+            return Response({"detail": "العنصر غير موجود"}, status=status.HTTP_404_NOT_FOUND)
+        subject = str(request.query_params.get("subject") or "").strip() or None
+        return Response(
+            serialize_teacher_archive_class_grades(teacher, term, school_class, subject=subject)
+        )
