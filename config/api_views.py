@@ -102,6 +102,7 @@ from config.serializers import (
     SubjectWriteSerializer,
     TeacherProfileSerializer,
     TeacherWriteSerializer,
+    StaffTypeSerializer,
     ParentAlertSerializer,
     ScheduleSerializer,
 )
@@ -124,7 +125,7 @@ from finance.services import (
     build_fee_status,
     restore_student_access_after_fees,
 )
-from staff.models import TeacherClassAssignment, TeacherProfile, TeacherReadAlert
+from staff.models import StaffType, TeacherClassAssignment, TeacherProfile, TeacherReadAlert
 from staff.assignment_validation import (
     class_subject_assignments,
     collect_subject_class_conflicts,
@@ -332,7 +333,9 @@ class PublicSchoolValuesView(CachedAPIViewMixin, APIView):
 class PublicTeachersViewSet(CachedReadOnlyViewSetMixin, viewsets.ReadOnlyModelViewSet):
     permission_classes = [AllowAny]
     serializer_class = TeacherProfileSerializer
-    queryset = TeacherProfile.objects.filter(is_public=True).prefetch_related(
+    queryset = TeacherProfile.objects.filter(is_public=True, staff_type__is_teacher=True).select_related(
+        "staff_type"
+    ).prefetch_related(
         "teaching_subjects",
         "class_assignments",
         "homeroom_classes",
@@ -736,7 +739,7 @@ class AdminTeacherViewSet(viewsets.ModelViewSet):
         return [permission() for permission in permission_classes]
 
     def get_queryset(self):
-        return TeacherProfile.objects.prefetch_related(
+        return TeacherProfile.objects.select_related("staff_type").prefetch_related(
             "class_assignments", "teaching_subjects", "homeroom_classes"
         ).all()
 
@@ -767,6 +770,19 @@ class AdminTeacherViewSet(viewsets.ModelViewSet):
                 "password": new_password,
             }
         )
+
+
+class AdminStaffTypeViewSet(viewsets.ModelViewSet):
+    permission_classes = [AdminScopePermission("staff")]
+    serializer_class = StaffTypeSerializer
+    queryset = StaffType.objects.all()
+
+    def perform_destroy(self, instance):
+        if instance.is_teacher:
+            raise ValidationError({"detail": "لا يمكن حذف نوع «معلم» من النظام."})
+        if instance.members.exists():
+            raise ValidationError({"detail": "لا يمكن حذف نوع مرتبط بأعضاء كادر."})
+        instance.delete()
 
 
 class AdminFeePlanViewSet(viewsets.ModelViewSet):

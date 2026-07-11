@@ -16,7 +16,7 @@ from content.schedule_validation import (
     validate_class_schedule_teacher_conflicts,
     validate_unique_class_schedule_classes,
 )
-from staff.models import TeacherClassAssignment, TeacherProfile
+from staff.models import StaffType, TeacherClassAssignment, TeacherProfile
 from staff.assignment_validation import (
     teacher_class_ids,
     validate_teacher_subject_class_assignments,
@@ -344,6 +344,39 @@ class ClassStudentSerializer(serializers.Serializer):
     note = serializers.CharField()
 
 
+class StaffTypeSerializer(serializers.ModelSerializer):
+    isTeacher = serializers.BooleanField(source="is_teacher", read_only=True)
+    sortOrder = serializers.IntegerField(source="sort_order", required=False)
+    name = serializers.CharField(max_length=100, validators=[])
+
+    class Meta:
+        model = StaffType
+        fields = ["id", "name", "isTeacher", "sortOrder"]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["id"] = str(data["id"])
+        data["sortOrder"] = instance.sort_order
+        return data
+
+    def validate_name(self, value):
+        cleaned = (value or "").strip()
+        if not cleaned:
+            raise serializers.ValidationError("اسم النوع مطلوب")
+        if cleaned == "معلم":
+            raise serializers.ValidationError("نوع «معلم» موجود مسبقاً في النظام")
+        qs = StaffType.objects.filter(name__iexact=cleaned)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("هذا النوع موجود مسبقاً")
+        return cleaned
+
+    def create(self, validated_data):
+        validated_data["is_teacher"] = False
+        return super().create(validated_data)
+
+
 class TeacherProfileSerializer(serializers.ModelSerializer):
     userId = serializers.PrimaryKeyRelatedField(
         source="user", queryset=User.objects.all(),
@@ -363,6 +396,16 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
     status = serializers.SerializerMethodField()
     homeroomClassId = serializers.SerializerMethodField()
     homeroomClassName = serializers.SerializerMethodField()
+    staffTypeId = serializers.PrimaryKeyRelatedField(source="staff_type", read_only=True)
+    staffTypeName = serializers.CharField(source="staff_type.name", read_only=True)
+    isTeacher = serializers.BooleanField(source="staff_type.is_teacher", read_only=True)
+    nameEn = serializers.CharField(source="name_en", required=False, allow_blank=True)
+    nationalId = serializers.CharField(source="national_id", read_only=True)
+    dateOfBirth = serializers.DateField(source="date_of_birth", format="%Y-%m-%d", read_only=True)
+    maritalStatus = serializers.CharField(source="marital_status", read_only=True)
+    altMobile = serializers.CharField(source="alt_mobile", read_only=True)
+    joinDate = serializers.DateField(source="join_date", format="%Y-%m-%d", read_only=True)
+    age = serializers.SerializerMethodField()
 
     class Meta:
         model = TeacherProfile
@@ -371,7 +414,21 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
             "userId",
             "username",
             "generatedPassword",
+            "staffTypeId",
+            "staffTypeName",
+            "isTeacher",
             "name",
+            "nameEn",
+            "nationalId",
+            "dateOfBirth",
+            "age",
+            "gender",
+            "maritalStatus",
+            "mobile",
+            "altMobile",
+            "address",
+            "joinDate",
+            "notes",
             "subject",
             "subjects",
             "subjectIds",
@@ -431,6 +488,9 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
     def get_generatedPassword(self, obj):
         return getattr(obj, "_generated_password", None)
 
+    def get_age(self, obj):
+        return obj.age
+
     def get_classIds(self, obj):
         from staff.assignment_validation import teacher_class_ids
 
@@ -456,6 +516,8 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
         data["id"] = str(data["id"])
         if data.get("userId") is not None:
             data["userId"] = str(data["userId"])
+        if data.get("staffTypeId") is not None:
+            data["staffTypeId"] = str(data["staffTypeId"])
         data.pop("image", None)
         return data
 
@@ -467,10 +529,31 @@ class TeacherWriteSerializer(serializers.ModelSerializer):
         allow_null=True,
         required=False,
     )
+    staffTypeId = serializers.PrimaryKeyRelatedField(
+        source="staff_type",
+        queryset=StaffType.objects.all(),
+    )
+    nameEn = serializers.CharField(source="name_en", required=False, allow_blank=True)
+    nationalId = serializers.CharField(source="national_id")
+    dateOfBirth = serializers.DateField(source="date_of_birth", required=False, allow_null=True, format="%Y-%m-%d")
+    maritalStatus = serializers.ChoiceField(
+        source="marital_status",
+        choices=TeacherProfile.MaritalStatus.choices,
+        required=False,
+        allow_blank=True,
+    )
+    gender = serializers.ChoiceField(
+        choices=TeacherProfile.Gender.choices,
+        required=False,
+        allow_blank=True,
+    )
+    altMobile = serializers.CharField(source="alt_mobile", required=False, allow_blank=True)
+    joinDate = serializers.DateField(source="join_date", required=False, allow_null=True, format="%Y-%m-%d")
     subjectIds = serializers.PrimaryKeyRelatedField(
         source="teaching_subjects",
         queryset=Subject.objects.all(),
         many=True,
+        required=False,
     )
     subject = serializers.SerializerMethodField()
     subjects = serializers.SerializerMethodField()
@@ -482,12 +565,29 @@ class TeacherWriteSerializer(serializers.ModelSerializer):
         write_only=True,
     )
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.instance is not None:
+            self.fields["staffTypeId"].required = False
+            self.fields["nationalId"].required = False
+
     class Meta:
         model = TeacherProfile
         fields = [
             "id",
             "userId",
+            "staffTypeId",
             "name",
+            "nameEn",
+            "nationalId",
+            "dateOfBirth",
+            "gender",
+            "maritalStatus",
+            "mobile",
+            "altMobile",
+            "address",
+            "joinDate",
+            "notes",
             "subject",
             "subjects",
             "subjectIds",
@@ -500,6 +600,23 @@ class TeacherWriteSerializer(serializers.ModelSerializer):
         ]
         extra_kwargs = {"image": {"write_only": True}}
 
+    def validate_nationalId(self, value):
+        cleaned = (value or "").strip()
+        if not re.fullmatch(r"\d{9}", cleaned):
+            raise serializers.ValidationError("رقم الهوية يجب أن يكون 9 أرقام.")
+        qs = TeacherProfile.objects.filter(national_id=cleaned)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("رقم الهوية مستخدم مسبقاً.")
+        return cleaned
+
+    def _staff_type_is_teacher(self, attrs):
+        staff_type = attrs.get("staff_type")
+        if staff_type is None and self.instance is not None:
+            staff_type = self.instance.staff_type
+        return bool(staff_type and staff_type.is_teacher)
+
     def get_subject(self, obj):
         return "، ".join(s.name for s in obj.teaching_subjects.all())
 
@@ -507,12 +624,20 @@ class TeacherWriteSerializer(serializers.ModelSerializer):
         return [s.name for s in obj.teaching_subjects.all()]
 
     def validate(self, attrs):
-        if self.instance is None and not attrs.get("teaching_subjects"):
-            raise serializers.ValidationError({"subjectIds": "يجب اختيار مادة واحدة على الأقل"})
+        is_teacher = self._staff_type_is_teacher(attrs)
+
+        if self.instance is None:
+            if not attrs.get("staff_type"):
+                raise serializers.ValidationError({"staffTypeId": "يجب اختيار التخصص / الوظيفة"})
+            if not attrs.get("national_id"):
+                raise serializers.ValidationError({"nationalId": "يجب إدخال رقم الهوية"})
 
         subjects = attrs.get("teaching_subjects")
         if subjects is None and self.instance is not None:
             subjects = list(self.instance.teaching_subjects.all())
+
+        if self.instance is None and is_teacher and not subjects:
+            raise serializers.ValidationError({"subjectIds": "يجب اختيار مادة واحدة على الأقل للمعلم"})
 
         class_ids = self.initial_data.get("classIds") if hasattr(self, "initial_data") else None
         if class_ids is None and self.instance is not None:
@@ -533,28 +658,36 @@ class TeacherWriteSerializer(serializers.ModelSerializer):
         validated_data.pop("user", None)
         class_ids = validated_data.pop("classIds", [])
         subjects = validated_data.pop("teaching_subjects", [])
-        user, password = create_auto_user(
-            name=validated_data["name"],
-            role=User.Role.TEACHER,
-        )
-        validated_data["user"] = user
+        staff_type = validated_data.get("staff_type")
+        user = None
+        password = None
+        if staff_type and staff_type.is_teacher:
+            user, password = create_auto_user(
+                name=validated_data["name"],
+                role=User.Role.TEACHER,
+            )
+            validated_data["user"] = user
         teacher = TeacherProfile.objects.create(**validated_data)
-        teacher.teaching_subjects.set(subjects)
-        self._set_classes(teacher, class_ids)
-        teacher._generated_password = password
+        if staff_type and staff_type.is_teacher:
+            teacher.teaching_subjects.set(subjects)
+            self._set_classes(teacher, class_ids)
+        if password:
+            teacher._generated_password = password
         return teacher
 
     def update(self, instance, validated_data):
         class_ids = validated_data.pop("classIds", None)
         subjects = validated_data.pop("teaching_subjects", None)
         status = validated_data.pop("status", None)
+        staff_type = validated_data.get("staff_type", instance.staff_type)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
-        if subjects is not None:
-            instance.teaching_subjects.set(subjects)
-        if class_ids is not None:
-            self._set_classes(instance, class_ids)
+        if staff_type and staff_type.is_teacher:
+            if subjects is not None:
+                instance.teaching_subjects.set(subjects)
+            if class_ids is not None:
+                self._set_classes(instance, class_ids)
         if status is not None and instance.user_id:
             instance.user.status = status
             instance.user.save(update_fields=["status"])

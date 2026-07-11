@@ -30,6 +30,7 @@ from config.api_views import (
     AdminStudentViewSet,
     AdminSubjectViewSet,
     AdminTeacherViewSet,
+    AdminStaffTypeViewSet,
     ParentAlertsView,
     ParentAlertDismissView,
     ParentArchiveCertificatesView,
@@ -83,6 +84,7 @@ router.register("admin/grades", AdminGradeViewSet, basename="admin-grades")
 router.register("admin/classes", AdminClassViewSet, basename="admin-classes")
 router.register("admin/subjects", AdminSubjectViewSet, basename="admin-subjects")
 router.register("admin/teachers", AdminTeacherViewSet, basename="admin-teachers")
+router.register("admin/staff-types", AdminStaffTypeViewSet, basename="admin-staff-types")
 router.register("admin/finance/plans", AdminFeePlanViewSet, basename="admin-finance-plans")
 router.register("admin/finance/payments", AdminFinanceViewSet, basename="admin-finance")
 router.register("admin/schedules", AdminScheduleViewSet, basename="admin-schedules")
