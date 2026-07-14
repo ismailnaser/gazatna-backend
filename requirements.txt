@@ -1,26 +1,28 @@
-# Ghazatna — Python dependencies for gazatna-backend/
-# Scanned from project imports (144 .py files). Trading-platform packages excluded.
+# Ghazatna Django backend — requires Python 3.11.10
+# (latest version available on the production cPanel server)
 #
-# Install (from repo root or backend folder):
+# Install:
 #   pip install -r requirements.txt
 #
-# cPanel production:
-#   pip install -r requirements.txt
-#   gunicorn config.wsgi:application --bind 0.0.0.0:8000
+# cPanel:
+#   1) Setup Python App → select Python 3.11.10
+#   2) pip install -r requirements.txt
+#   3) gunicorn config.wsgi:application
 
-# --- Core framework (django, rest_framework, corsheaders, simplejwt) ---
+# --- Core framework ---
 Django>=5.2,<5.3
-djangorestframework>=3.16,<3.18
+djangorestframework>=3.15,<3.18
 django-cors-headers>=4.6,<5
 djangorestframework-simplejwt>=5.4,<6
 
-# --- Configuration (decouple: used in settings; dotenv: optional .env on server) ---
+# --- Configuration ---
 python-decouple>=3.8,<4
 python-dotenv>=1.0,<2
 
-# --- Images (PIL/Pillow: teacher image processing in staff.models) ---
-Pillow>=11.0,<13
+# --- Images (staff.models uses PIL) ---
+# Pillow 11.x is stable on Python 3.11 / cPanel builds
+Pillow>=11.0,<12
 
-# --- Production ---
-mysqlclient>=2.2,<3
-gunicorn>=22.0,<27
+# --- Production (MySQL + WSGI) ---
+mysqlclient>=2.2.4,<3
+gunicorn>=22.0,<24
