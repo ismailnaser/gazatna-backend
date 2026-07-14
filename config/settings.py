@@ -89,6 +89,7 @@ if IS_PRODUCTION:
             "HOST": os.environ["DB_HOST"],
             "PORT": os.environ.get("DB_PORT", "3306"),
             "OPTIONS": {
+                # Compatible with MariaDB 10.3 (cPanel hosting)
                 "charset": "utf8mb4",
                 "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
             },
