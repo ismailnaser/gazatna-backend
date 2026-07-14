@@ -1,5 +1,5 @@
-# Ghazatna Django backend — requires Python 3.11.10
-# (latest version available on the production cPanel server)
+# Ghazatna Django backend — Python 3.11.10 + Django 4.2 LTS
+# Django 4.2 is pinned because of cPanel / hosting package limits.
 #
 # Install:
 #   pip install -r requirements.txt
@@ -7,22 +7,20 @@
 # cPanel:
 #   1) Setup Python App → select Python 3.11.10
 #   2) pip install -r requirements.txt
-#   3) gunicorn config.wsgi:application
 
-# --- Core framework ---
-Django>=5.2,<5.3
-djangorestframework>=3.15,<3.18
-django-cors-headers>=4.6,<5
-djangorestframework-simplejwt>=5.4,<6
+# --- Core framework (Django 4.2 LTS — hosting constraint) ---
+Django>=4.2,<4.3
+djangorestframework>=3.14,<3.16
+django-cors-headers>=4.3,<4.5
+djangorestframework-simplejwt>=5.3,<5.4
 
 # --- Configuration ---
 python-decouple>=3.8,<4
 python-dotenv>=1.0,<2
 
 # --- Images (staff.models uses PIL) ---
-# Pillow 11.x is stable on Python 3.11 / cPanel builds
-Pillow>=11.0,<12
+Pillow>=10.0,<12
 
 # --- Production (MySQL + WSGI) ---
 mysqlclient>=2.2.4,<3
-gunicorn>=22.0,<24
+gunicorn>=21.2,<23
