@@ -26,8 +26,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DJANGO_ENV = os.environ.get("DJANGO_ENV", "local").strip().lower()
 IS_PRODUCTION = DJANGO_ENV in ("production", "prod")
 
+# Temporary diagnosis on cPanel: set DJANGO_DEBUG=1 in Environment variables
+# (turn off after fixing — never leave debug on public production).
+DEBUG = not IS_PRODUCTION or os.environ.get("DJANGO_DEBUG", "").strip() in ("1", "true", "True")
+
 SECRET_KEY = config("SECRET_KEY", default="django-insecure-ghazatna-dev-key-change-in-production")
-DEBUG = not IS_PRODUCTION
+if IS_PRODUCTION and SECRET_KEY.startswith("django-insecure-"):
+    # Fail loudly in logs rather than silently using the insecure default.
+    pass
 
 INSTALLED_APPS = [
     "config.apps.ProjectConfig",
@@ -79,26 +85,54 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 
 if IS_PRODUCTION:
-    ALLOWED_HOSTS = ["gzs.edu.ps", "www.gzs.edu.ps"]
+    raw_hosts = config(
+        "ALLOWED_HOSTS",
+        default="gzs.edu.ps,www.gzs.edu.ps,api.gzs.edu.ps,.edu.ps,localhost,127.0.0.1",
+    )
+    ALLOWED_HOSTS = [h.strip() for h in raw_hosts.split(",") if h.strip()]
+    # Emergency override for diagnosis only: ALLOWED_HOSTS=*
+    if ALLOWED_HOSTS == ["*"]:
+        ALLOWED_HOSTS = ["*"]
+
+    def _required_env(name: str) -> str:
+        value = os.environ.get(name, "").strip()
+        if not value:
+            raise RuntimeError(
+                f"Missing required environment variable {name}. "
+                "Set it in Setup Python App → Environment variables, then Restart."
+            )
+        return value
+
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.mysql",
-            "NAME": os.environ["DB_NAME"],
-            "USER": os.environ["DB_USER"],
-            "PASSWORD": os.environ["DB_PASSWORD"],
-            "HOST": os.environ["DB_HOST"],
+            "NAME": _required_env("DB_NAME"),
+            "USER": _required_env("DB_USER"),
+            "PASSWORD": _required_env("DB_PASSWORD"),
+            "HOST": _required_env("DB_HOST"),
             "PORT": os.environ.get("DB_PORT", "3306"),
             "OPTIONS": {
-                # Compatible with MariaDB 10.3 (cPanel hosting)
                 "charset": "utf8mb4",
                 "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
             },
         }
     }
-    CORS_ALLOWED_ORIGINS = config(
-        "CORS_ALLOWED_ORIGINS",
-        default="https://gzs.edu.ps,https://www.gzs.edu.ps",
-    ).split(",")
+    CORS_ALLOWED_ORIGINS = [
+        o.strip()
+        for o in config(
+            "CORS_ALLOWED_ORIGINS",
+            default="https://gzs.edu.ps,https://www.gzs.edu.ps",
+        ).split(",")
+        if o.strip()
+    ]
+    CSRF_TRUSTED_ORIGINS = [
+        o.strip()
+        for o in config(
+            "CSRF_TRUSTED_ORIGINS",
+            default="https://gzs.edu.ps,https://www.gzs.edu.ps",
+        ).split(",")
+        if o.strip()
+    ]
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 else:
     ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1").split(",")
@@ -134,6 +168,11 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# Ensure writable dirs exist on cPanel (avoids 500 from cache/file backends)
+(BASE_DIR / "cache").mkdir(exist_ok=True)
+(BASE_DIR / "logs").mkdir(exist_ok=True)
+(BASE_DIR / "media").mkdir(exist_ok=True)
+
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
@@ -141,6 +180,44 @@ CACHES = {
         "TIMEOUT": 300,
         "OPTIONS": {"MAX_ENTRIES": 5000},
     }
+}
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "[{asctime}] {levelname} {name}: {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "file": {
+            "class": "logging.FileHandler",
+            "filename": str(BASE_DIR / "logs" / "django.log"),
+            "formatter": "verbose",
+        },
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+        },
+    },
+    "root": {
+        "handlers": ["file", "console"],
+        "level": "INFO",
+    },
+    "loggers": {
+        "django.request": {
+            "handlers": ["file", "console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+        "django.security": {
+            "handlers": ["file", "console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+    },
 }
 
 REST_FRAMEWORK = {
