@@ -1,73 +1,137 @@
 """
-cPanel / Phusion Passenger entry point for Django.
+cPanel Passenger entry for Django.
+
+If Django fails to start, the browser shows the real traceback
+instead of a blank Internal Server Error, and a log file is written.
 """
+from __future__ import annotations
+
 import os
 import sys
 import traceback
+from datetime import datetime
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
-ERROR_LOG = LOG_DIR / "passenger_error.log"
+
+# Create logs as early as possible (even if Django never loads)
+try:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    BOOT_LOG = LOG_DIR / "boot.log"
+    ERR_LOG = LOG_DIR / "passenger_error.log"
+except Exception:
+    BOOT_LOG = BASE_DIR / "boot.log"
+    ERR_LOG = BASE_DIR / "passenger_error.log"
 
 
-def _log(msg: str) -> None:
+def _append(path: Path, text: str) -> None:
     try:
-        with ERROR_LOG.open("a", encoding="utf-8") as fh:
-            fh.write(msg.rstrip() + "\n")
-    except OSError:
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except Exception:
         pass
 
 
+def _boot(msg: str) -> None:
+    _append(BOOT_LOG, f"[{datetime.utcnow().isoformat()}Z] {msg}\n")
+
+
+_boot(f"passenger_wsgi starting  python={sys.version.split()[0]}  base={BASE_DIR}")
+_boot(f"cwd={os.getcwd()}")
+_boot(f"DJANGO_ENV={os.environ.get('DJANGO_ENV', '')!r}")
+_boot(f"DJANGO_SETTINGS_MODULE={os.environ.get('DJANGO_SETTINGS_MODULE', '')!r}")
+_boot(f"DJANGO_DEBUG={os.environ.get('DJANGO_DEBUG', '')!r}")
+for key in ("DB_NAME", "DB_USER", "DB_HOST", "DB_PASSWORD", "SECRET_KEY", "ALLOWED_HOSTS"):
+    present = "SET" if os.environ.get(key) else "MISSING"
+    # Never log secret values — only presence.
+    _boot(f"env {key}={present}")
+
+
 def _attach_virtualenv() -> None:
-    """Prepend cPanel virtualenv site-packages so Passenger finds Django."""
-    attached = []
+    attached: list[str] = []
 
     def add_site(site: Path) -> None:
-        site_str = str(site)
-        if site.is_dir() and site_str not in sys.path:
-            sys.path.insert(0, site_str)
-            attached.append(site_str)
+        s = str(site)
+        if site.is_dir() and s not in sys.path:
+            sys.path.insert(0, s)
+            attached.append(s)
 
-    venv = os.environ.get("VIRTUAL_ENV", "").strip()
+    venv = (os.environ.get("VIRTUAL_ENV") or "").strip()
     if venv:
         for site in Path(venv).glob("lib/python*/site-packages"):
             add_site(site)
 
-    # cPanel usually stores envs under ~/virtualenv/...
     home = Path.home()
-    roots = [home / "virtualenv", BASE_DIR.parent / "virtualenv"]
-    for root in roots:
+    for root in (home / "virtualenv", BASE_DIR.parent / "virtualenv"):
         if not root.exists():
             continue
-        # Prefer paths mentioning this project name
-        matches = sorted(root.rglob("site-packages"), key=lambda p: ("gazatna-backend" not in str(p), len(str(p))))
-        for site in matches[:8]:
+        sites = sorted(
+            root.rglob("site-packages"),
+            key=lambda p: ("gazatna-backend" not in str(p).replace("\\", "/"), len(str(p))),
+        )
+        for site in sites[:12]:
             add_site(site)
 
     if attached:
-        _log("Attached site-packages:\n  - " + "\n  - ".join(attached))
+        _boot("site-packages attached:\n  - " + "\n  - ".join(attached))
     else:
-        _log("WARNING: no virtualenv site-packages attached; relying on Passenger env")
+        _boot("WARNING: no virtualenv site-packages attached")
 
 
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 _attach_virtualenv()
-
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 
-force_script = os.environ.get("FORCE_SCRIPT_NAME", "").strip()
+force_script = (os.environ.get("FORCE_SCRIPT_NAME") or "").strip()
 if force_script:
     os.environ["SCRIPT_NAME"] = force_script
+    _boot(f"FORCE_SCRIPT_NAME={force_script}")
+
+_LOAD_ERROR: str | None = None
 
 try:
     from django.core.wsgi import get_wsgi_application
 
     application = get_wsgi_application()
-    _log("Django WSGI application loaded OK")
+    _boot("Django WSGI loaded OK")
 except Exception:
-    _log("FAILED to start Django WSGI:\n" + traceback.format_exc())
-    raise
+    _LOAD_ERROR = traceback.format_exc()
+    _boot("Django WSGI FAILED\n" + _LOAD_ERROR)
+    _append(ERR_LOG, f"\n===== {_boot.__name__} failure =====\n{_LOAD_ERROR}\n")
+
+    def application(environ, start_response):  # type: ignore[no-redef]
+        """Fallback app: show the real startup error in the browser."""
+        body = (
+            "<!doctype html><html><head><meta charset='utf-8'>"
+            "<title>Django failed to start</title></head><body>"
+            "<h1>Django failed to start on this server</h1>"
+            "<p>This page is generated by <code>passenger_wsgi.py</code> so you can see the real error.</p>"
+            f"<p><strong>Log file:</strong> <code>{BOOT_LOG}</code></p>"
+            "<h2>Environment presence</h2><ul>"
+            + "".join(
+                f"<li>{k}: {'SET' if os.environ.get(k) else 'MISSING'}</li>"
+                for k in (
+                    "DJANGO_ENV",
+                    "DJANGO_SETTINGS_MODULE",
+                    "DB_NAME",
+                    "DB_USER",
+                    "DB_PASSWORD",
+                    "DB_HOST",
+                    "SECRET_KEY",
+                )
+            )
+            + "</ul>"
+            "<h2>Traceback</h2>"
+            f"<pre style='white-space:pre-wrap;background:#111;color:#eee;padding:12px'>{_LOAD_ERROR}</pre>"
+            "</body></html>"
+        ).encode("utf-8")
+        start_response(
+            "500 Internal Server Error",
+            [("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(body)))],
+        )
+        return [body]
