@@ -21,10 +21,18 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 #   DB_HOST=localhost
 #   SECRET_KEY=...
 #   CORS_ALLOWED_ORIGINS=https://gzs.edu.ps,https://www.gzs.edu.ps
+#   FORCE_SCRIPT_NAME=/backend   # إذا Python App على gzs.edu.ps/backend
 # ---------------------------------------------------------------------------
 
 DJANGO_ENV = os.environ.get("DJANGO_ENV", "local").strip().lower()
 IS_PRODUCTION = DJANGO_ENV in ("production", "prod")
+
+# When Passenger is mounted at a subpath (e.g. https://gzs.edu.ps/backend/):
+# set FORCE_SCRIPT_NAME=/backend in Setup Python App → Environment variables.
+_FORCE_SCRIPT = os.environ.get("FORCE_SCRIPT_NAME", "").strip().rstrip("/")
+if _FORCE_SCRIPT and not _FORCE_SCRIPT.startswith("/"):
+    _FORCE_SCRIPT = "/" + _FORCE_SCRIPT
+FORCE_SCRIPT_NAME = _FORCE_SCRIPT or None
 
 # Temporary diagnosis on cPanel: set DJANGO_DEBUG=1 in Environment variables
 # (turn off after fixing — never leave debug on public production).
@@ -162,11 +170,17 @@ TIME_ZONE = "Asia/Gaza"
 USE_I18N = True
 USE_TZ = True
 
-STATIC_URL = "/static/"
+_prefix = FORCE_SCRIPT_NAME or ""
+STATIC_URL = f"{_prefix}/static/"
 STATIC_ROOT = BASE_DIR / "static"
-MEDIA_URL = "/media/"
+MEDIA_URL = f"{_prefix}/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+if FORCE_SCRIPT_NAME:
+    # Keep admin/session cookies scoped to the mounted path on shared hosting.
+    SESSION_COOKIE_PATH = f"{FORCE_SCRIPT_NAME}/"
+    CSRF_COOKIE_PATH = f"{FORCE_SCRIPT_NAME}/"
 
 # Ensure writable dirs exist on cPanel (avoids 500 from cache/file backends)
 (BASE_DIR / "cache").mkdir(exist_ok=True)
