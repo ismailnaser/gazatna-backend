@@ -1,8 +1,0 @@
-"""
-Restore real Django passenger entry after diagnosis succeeds.
-
-Usage on server when ready:
-  1) Confirm diagnostic passenger shows PASSENGER OK
-  2) Rename/copy this file over passenger_wsgi.py
-     OR pull from git once we restore Django loading here.
-"""
