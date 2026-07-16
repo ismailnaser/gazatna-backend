@@ -24,6 +24,10 @@ python-dotenv>=1.0,<2
 # --- Images (staff.models uses PIL) ---
 Pillow>=10.0,<12
 
-# --- Production (MariaDB/MySQL via mysqlclient + WSGI) ---
-mysqlclient>=2.1.1,<3
+# --- Production DB + WSGI ---
+# PyMySQL: pure Python — works on cPanel when mysqlclient fails to build
+# (broken pkg-config / missing MariaDB client headers).
+PyMySQL>=1.1.0,<2
+# Optional faster C driver if your host can compile it:
+# mysqlclient>=2.1.1,<3
 gunicorn>=21.2,<23

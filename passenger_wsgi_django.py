@@ -49,6 +49,14 @@ force_script = (os.environ.get("FORCE_SCRIPT_NAME") or "").strip()
 if force_script:
     os.environ["SCRIPT_NAME"] = force_script
 
+try:
+    import pymysql
+
+    pymysql.install_as_MySQLdb()
+    _boot("PyMySQL as MySQLdb")
+except ImportError:
+    _boot("PyMySQL not installed — expecting mysqlclient")
+
 _LOAD_ERROR = None
 try:
     from django.core.wsgi import get_wsgi_application
