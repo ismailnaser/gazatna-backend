@@ -13,6 +13,7 @@ logs/*
 !logs/.gitkeep
 media/
 static/
+staticfiles/
 PASSENGER_HIT.txt
 tmp/
 *.log

@@ -64,6 +64,8 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # Serve admin CSS/JS in production (DEBUG=False) on cPanel/Passenger.
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -175,10 +177,13 @@ USE_TZ = True
 
 _prefix = FORCE_SCRIPT_NAME or ""
 STATIC_URL = f"{_prefix}/static/"
-STATIC_ROOT = BASE_DIR / "static"
+STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = f"{_prefix}/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# WhiteNoise: collectstatic output is served by the app (needed when DEBUG=False).
+STATICFILES_STORAGE = "whitenoise.storage.CompressedStaticFilesStorage"
 
 if FORCE_SCRIPT_NAME:
     # Keep admin/session cookies scoped to the mounted path on shared hosting.
