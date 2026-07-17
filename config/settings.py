@@ -182,8 +182,9 @@ MEDIA_URL = f"{_prefix}/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# WhiteNoise: collectstatic output is served by the app (needed when DEBUG=False).
-STATICFILES_STORAGE = "whitenoise.storage.CompressedStaticFilesStorage"
+# WhiteNoise middleware serves STATIC_ROOT. Avoid Compressed* storage on cPanel:
+# collectstatic uses ThreadPoolExecutor and hits "can't start new thread".
+STATICFILES_STORAGE = "django.contrib.staticfiles.storage.StaticFilesStorage"
 
 if FORCE_SCRIPT_NAME:
     # Keep admin/session cookies scoped to the mounted path on shared hosting.
