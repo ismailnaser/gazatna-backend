@@ -60,6 +60,12 @@ class FeePlan(models.Model):
 class FeeInstallment(models.Model):
     fee_plan = models.ForeignKey(FeePlan, on_delete=models.CASCADE, related_name="installments")
     order = models.PositiveIntegerField()
+    name = models.CharField(
+        max_length=120,
+        blank=True,
+        default="",
+        verbose_name="اسم الدفعة",
+    )
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True)
@@ -70,8 +76,12 @@ class FeeInstallment(models.Model):
         ordering = ["order"]
         unique_together = [("fee_plan", "order")]
 
+    def display_name(self) -> str:
+        cleaned = (self.name or "").strip()
+        return cleaned if cleaned else f"دفعة {self.order}"
+
     def __str__(self):
-        return f"{self.fee_plan.name} — دفعة {self.order}"
+        return f"{self.fee_plan.name} — {self.display_name()}"
 
 
 class StudentFeeBalance(models.Model):

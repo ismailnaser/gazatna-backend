@@ -143,6 +143,9 @@ class AdmissionApplication(models.Model):
     grade = models.CharField(max_length=50)
     parent_name = models.CharField(max_length=200)
     phone = models.CharField(max_length=50)
+    address = models.CharField(
+        max_length=300, blank=True, default="", verbose_name="العنوان"
+    )
     email = models.EmailField(blank=True)
     notes = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=AdmissionStatus.choices, default=AdmissionStatus.PENDING)

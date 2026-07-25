@@ -87,6 +87,15 @@ class Student(models.Model):
     name = models.CharField(max_length=200)
     student_number = models.CharField(max_length=50, unique=True)
     national_id = models.CharField(max_length=20, blank=True, default="")
+    parent_phone = models.CharField(
+        max_length=50, blank=True, default="", verbose_name="رقم جوال ولي الأمر"
+    )
+    address = models.CharField(
+        max_length=300, blank=True, default="", verbose_name="العنوان"
+    )
+    evaluation = models.TextField(
+        blank=True, default="", verbose_name="تقييم الطالب"
+    )
     grade_level = models.CharField(max_length=50)
     section = models.CharField(max_length=10)
     school_class = models.ForeignKey(

@@ -1014,6 +1014,10 @@ class AdminAnalyticsView(CachedAPIViewMixin, APIView):
         grade_chart = _build_grade_chart()
         fees_chart = _build_fees_chart()
 
+        from academics.analytics_services import student_enrollment_analytics
+
+        enrollment = student_enrollment_analytics()
+
         return {
             "avgGrade": avg_grade,
             "feesCollected": fees_collected,
@@ -1023,14 +1027,23 @@ class AdminAnalyticsView(CachedAPIViewMixin, APIView):
             "overdueInstallments": overdue_students,
             "pendingAdmissions": pending_admissions,
             "newMessages": new_messages,
+            "registeredStudents": enrollment["registeredStudents"],
+            "previousYearRegisteredStudents": enrollment["previousYearRegisteredStudents"],
+            "studentsGrowthPercent": enrollment["studentsGrowthPercent"],
+            "academicYear": enrollment["academicYear"],
+            "previousAcademicYear": enrollment["previousAcademicYear"],
+            "activeStudents": enrollment["activeStudents"],
+            "totalStudents": enrollment["totalStudents"],
             "urgentTasks": urgent_tasks,
             "gradeChart": grade_chart,
             "feesChart": fees_chart,
+            "studentsChart": enrollment["studentsChart"],
+            "yearlyStudentsChart": enrollment["yearlyStudentsChart"],
         }
 
 
 class AdminAnalyticsDetailsView(APIView):
-    permission_classes = [AdminScopePermission("academics", "finance")]
+    permission_classes = [AdminScopePermission("academics", "finance", "students")]
 
     def get(self, request):
         grade_level = (request.query_params.get("gradeLevel") or "").strip()
@@ -1056,7 +1069,11 @@ class AdminAnalyticsDetailsView(APIView):
             balances_qs = balances_qs.filter(student__grade_level=grade_level)
 
         # Success rate chart by grade level (or a single grade if filtered)
-        from academics.analytics_services import average_grade_percent, grade_chart_by_level
+        from academics.analytics_services import (
+            average_grade_percent,
+            grade_chart_by_level,
+            student_enrollment_analytics,
+        )
 
         grade_chart = grade_chart_by_level(grades_qs)
 
@@ -1111,13 +1128,27 @@ class AdminAnalyticsDetailsView(APIView):
 
         fees_collected = round(float(paid_fees) / float(total_fees) * 100, 1) if total_fees else 0
 
+        enrollment = student_enrollment_analytics(grade_level)
+        pending_admissions = AdmissionApplication.objects.filter(status="pending").count()
+
         return Response(
             {
                 "avgGrade": avg_grade,
                 "feesCollected": fees_collected,
+                "pendingAdmissions": pending_admissions,
+                "registeredStudents": enrollment["registeredStudents"],
+                "previousYearRegisteredStudents": enrollment["previousYearRegisteredStudents"],
+                "studentsGrowthPercent": enrollment["studentsGrowthPercent"],
+                "academicYear": enrollment["academicYear"],
+                "previousAcademicYear": enrollment["previousAcademicYear"],
+                "activeStudents": enrollment["activeStudents"],
+                "inactiveStudents": enrollment["inactiveStudents"],
+                "totalStudents": enrollment["totalStudents"],
                 "urgentTasks": [],
                 "gradeChart": grade_chart,
                 "feesChart": fees_chart,
+                "studentsChart": enrollment["studentsChart"],
+                "yearlyStudentsChart": enrollment["yearlyStudentsChart"],
                 "filters": {
                     "gradeLevel": grade_level or None,
                     "from": str(from_date) if from_date else None,
@@ -3577,6 +3608,7 @@ class PublicAdmissionApplicationView(APIView):
         notes = str(data.get("notes", "")).strip()
         birth_date_raw = str(data.get("birthDate", "")).strip()
         national_id = str(data.get("nationalId", "")).strip()
+        address = str(data.get("address", "")).strip()
         if not national_id:
             return Response({"detail": "رقم الهوية مطلوب"}, status=status.HTTP_400_BAD_REQUEST)
         if not re.fullmatch(r"\d{9}", national_id):
@@ -3613,6 +3645,7 @@ class PublicAdmissionApplicationView(APIView):
             parent_name=parent_name,
             grade=grade,
             phone=phone,
+            address=address,
             email=email,
             notes=notes,
             birth_date=birth_date,
@@ -3637,6 +3670,7 @@ class AdminAdmissionApplicationsView(APIView):
                 "grade": a.grade,
                 "parentName": a.parent_name,
                 "phone": a.phone,
+                "address": a.address or "",
                 "email": a.email,
                 "notes": a.notes,
                 "status": a.status,
@@ -3671,6 +3705,8 @@ class AdminApproveAdmissionView(APIView):
             data={
                 "name": app.student_name,
                 "nationalId": app.national_id or "",
+                "parentPhone": app.phone or "",
+                "address": app.address or "",
                 "classId": class_id,
                 "is_active": True,
             },

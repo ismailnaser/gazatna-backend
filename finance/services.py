@@ -6,6 +6,14 @@ from django.utils import timezone
 from finance.models import FeeInstallment, FeePlan, StudentFeeBalance
 
 
+def installment_label(inst) -> str:
+    if hasattr(inst, "display_name"):
+        return inst.display_name()
+    name = (getattr(inst, "name", None) or "").strip()
+    order = getattr(inst, "order", "")
+    return name if name else f"دفعة {order}"
+
+
 def get_fee_plan_for_student(student):
     return (
         FeePlan.objects.filter(is_active=True, grades__name=student.grade_level)
@@ -167,6 +175,7 @@ def build_installment_notifications(balance, installments, paid):
         notifications.append({
             "id": f"installment-{inst.order}",
             "order": inst.order,
+            "name": installment_label(inst),
             "amount": float(inst.amount),
             "remaining": float(remaining),
             "startDate": str(inst.start_date),
@@ -174,7 +183,7 @@ def build_installment_notifications(balance, installments, paid):
             "status": status,
             "type": "installment",
             "text": (
-                f"دفعة {inst.order}: {int(remaining)} ₪ مستحقة — "
+                f"{installment_label(inst)}: {int(remaining)} ₪ مستحقة — "
                 f"من {inst.start_date} إلى {inst.end_date}"
             ),
         })
@@ -284,21 +293,22 @@ def build_fee_status(student):
 
     blocking, remaining = find_blocking_installment(installments, paid, today)
     if blocking:
+        label = installment_label(blocking)
         if blocking.order == 1:
             message = (
-                f"يجب دفع مبلغ الدفعة الأولى ({int(remaining)} ₪) لاستئناف الوصول — "
+                f"يجب دفع مبلغ «{label}» ({int(remaining)} ₪) لاستئناف الوصول — "
                 f"وليس المبلغ الكلي ({int(total)} ₪)."
             )
         else:
             if blocking.start_date and blocking.end_date and today <= blocking.end_date:
                 message = (
-                    f"يجب دفع مبلغ الدفعة رقم {blocking.order} ({int(remaining)} ₪) لاستئناف الوصول — "
+                    f"يجب دفع مبلغ «{label}» ({int(remaining)} ₪) لاستئناف الوصول — "
                     f"المطلوب لهذه الدفعة: {int(blocking.amount)} ₪ "
                     f"(من {blocking.start_date} إلى {blocking.end_date})."
                 )
             else:
                 message = (
-                    f"يجب دفع مبلغ الدفعة رقم {blocking.order} ({int(remaining)} ₪) لاستئناف الوصول — "
+                    f"يجب دفع مبلغ «{label}» ({int(remaining)} ₪) لاستئناف الوصول — "
                     f"المطلوب لهذه الدفعة: {int(blocking.amount)} ₪ (انتهى الموعد: {blocking.end_date})."
                 )
         if inactive:
@@ -354,6 +364,7 @@ def _serialize_installment(inst, paid, installments, today=None):
     all_installments = installments
     return {
         "order": inst.order,
+        "name": installment_label(inst),
         "amount": float(inst.amount),
         "startDate": str(inst.start_date) if inst.start_date else None,
         "endDate": str(inst.end_date) if inst.end_date else None,

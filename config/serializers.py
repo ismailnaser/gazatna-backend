@@ -183,6 +183,9 @@ class StudentSerializer(serializers.ModelSerializer):
     section = serializers.CharField(required=False)
     studentNumber = serializers.CharField(source="student_number", required=False)
     nationalId = serializers.CharField(source="national_id", required=False, allow_blank=True)
+    parentPhone = serializers.CharField(source="parent_phone", required=False, allow_blank=True)
+    address = serializers.CharField(required=False, allow_blank=True)
+    evaluation = serializers.CharField(required=False, allow_blank=True)
     classId = serializers.PrimaryKeyRelatedField(
         source="school_class", queryset=SchoolClass.objects.all(), allow_null=True, required=False
     )
@@ -203,6 +206,9 @@ class StudentSerializer(serializers.ModelSerializer):
             "section",
             "studentNumber",
             "nationalId",
+            "parentPhone",
+            "address",
+            "evaluation",
             "classId",
             "username",
             "generatedPassword",
@@ -1249,10 +1255,11 @@ class FinanceNoticeSerializer(serializers.Serializer):
 class FeeInstallmentSerializer(serializers.ModelSerializer):
     startDate = serializers.DateField(source="start_date", allow_null=True, required=False)
     endDate = serializers.DateField(source="end_date", allow_null=True, required=False)
+    name = serializers.CharField(required=False, allow_blank=True, max_length=120)
 
     class Meta:
         model = FeeInstallment
-        fields = ["id", "order", "amount", "startDate", "endDate"]
+        fields = ["id", "order", "name", "amount", "startDate", "endDate"]
         read_only_fields = ["id"]
 
     def to_internal_value(self, data):
@@ -1262,6 +1269,8 @@ class FeeInstallmentSerializer(serializers.ModelSerializer):
             mutable["startDate"] = None
         if mutable.get("endDate") == "":
             mutable["endDate"] = None
+        if mutable.get("name") is None:
+            mutable["name"] = ""
         return super().to_internal_value(mutable)
 
     def to_representation(self, instance):
@@ -1269,6 +1278,7 @@ class FeeInstallmentSerializer(serializers.ModelSerializer):
         if data.get("id") is not None:
             data["id"] = str(data["id"])
         data["amount"] = float(data["amount"])
+        data["name"] = (data.get("name") or "").strip() or instance.display_name()
         data["startDate"] = str(data["startDate"]) if data["startDate"] else None
         data["endDate"] = str(data["endDate"]) if data["endDate"] else None
         return data
@@ -1374,6 +1384,7 @@ class FeePlanSerializer(serializers.ModelSerializer):
             FeeInstallment.objects.create(
                 fee_plan=plan,
                 order=row["order"],
+                name=str(row.get("name") or "").strip(),
                 amount=row["amount"],
                 start_date=row.get("start_date") or None,
                 end_date=row.get("end_date") or None,
