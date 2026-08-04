@@ -30,7 +30,6 @@ def register() -> None:
         Program,
         SchoolStat,
         SchoolValue,
-        SiteSettings,
     ):
         _connect(model, "content.changed")
 
@@ -42,7 +41,9 @@ def register() -> None:
     for model in (FeePlan, PaymentNotice, StudentFeeBalance):
         _connect(model, "finance.changed")
 
+    # SiteSettings only via site_settings.changed (avoid double warm with content.changed)
     def _site_settings_handler(sender, instance, **kwargs):
         emit("site_settings.changed", pk=getattr(instance, "pk", None))
 
     post_save.connect(_site_settings_handler, sender=SiteSettings, weak=False)
+    post_delete.connect(_site_settings_handler, sender=SiteSettings, weak=False)

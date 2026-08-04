@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import logging
 import threading
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
+import uuid
 
 from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
-_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ghazatna-job")
+# Cap workers so shared hosting (cPanel) does not exhaust process threads.
+_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ghazatna-job")
 _JOB_TTL = 3600
 
 
@@ -62,10 +63,19 @@ def get_job_status(job_id: str) -> dict[str, Any] | None:
 
 
 def run_async(func: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+    """Run work off the request thread via a bounded pool (no unlimited Thread() spawn)."""
+
     def wrapper() -> None:
         try:
             func(*args, **kwargs)
         except Exception:
             logger.exception("Async task failed: %s", getattr(func, "__name__", "task"))
 
-    threading.Thread(target=wrapper, daemon=True).start()
+    try:
+        _executor.submit(wrapper)
+    except RuntimeError:
+        # Pool shut down or host cannot create threads — skip rather than crash the worker.
+        logger.warning(
+            "Could not schedule async task %s (thread limit); skipping",
+            getattr(func, "__name__", "task"),
+        )

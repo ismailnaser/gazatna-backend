@@ -92,7 +92,8 @@ def get_current_academic_term():
     )
     if term:
         return term
-    return activate_due_academic_term(year)
+    # Read-path activation only — never wipe grades from incidental API traffic.
+    return activate_due_academic_term(year, reset_grades=False)
 
 
 def _all_prior_terms_closed(term: AcademicTerm, ordered_terms) -> bool:
