@@ -121,8 +121,12 @@ if IS_PRODUCTION:
             "PASSWORD": _required_env("DB_PASSWORD"),
             "HOST": _required_env("DB_HOST"),
             "PORT": os.environ.get("DB_PORT", "3306"),
+            # Close after each request — persistent connections + Passenger workers
+            # leak slots and can push CloudLinux NPROC over the cap.
+            "CONN_MAX_AGE": 0,
             "OPTIONS": {
                 "charset": "utf8mb4",
+                "connect_timeout": 8,
                 "init_command": (
                     "SET sql_mode='STRICT_TRANS_TABLES', "
                     "NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"
@@ -201,7 +205,8 @@ CACHES = {
         "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
         "LOCATION": BASE_DIR / "cache",
         "TIMEOUT": 300,
-        "OPTIONS": {"MAX_ENTRIES": 5000},
+        # Keep this small on CageFS — thousands of cache files exhaust inodes/NPROC helpers.
+        "OPTIONS": {"MAX_ENTRIES": 400},
     }
 }
 

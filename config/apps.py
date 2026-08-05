@@ -6,6 +6,7 @@ class ProjectConfig(AppConfig):
     name = "config"
 
     def ready(self) -> None:
+        # Import once so @on handlers attach. register() is idempotent.
         import config.event_handlers  # noqa: F401
         from config.model_signals import register
 

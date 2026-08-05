@@ -75,7 +75,6 @@ from config.permissions import (
 )
 from config.cache_mixins import CachedAPIViewMixin, CachedReadOnlyViewSetMixin
 from config.events import emit
-from config.jobs import enqueue_job, run_async
 from config.serializers import (
     ClassGradebookSerializer,
     ClassStudentSerializer,
@@ -792,11 +791,11 @@ class AdminFeePlanViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         plan = serializer.save()
-        run_async(apply_plan_to_students, plan)
+        apply_plan_to_students(plan)
 
     def perform_update(self, serializer):
         plan = serializer.save()
-        run_async(apply_plan_to_students, plan)
+        apply_plan_to_students(plan)
 
 
 class AdminFinanceViewSet(viewsets.ModelViewSet):

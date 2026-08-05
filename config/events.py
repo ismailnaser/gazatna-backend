@@ -11,7 +11,9 @@ _handlers: dict[str, list[Callable[..., None]]] = defaultdict(list)
 
 def on(event_name: str):
     def decorator(handler: Callable[..., None]) -> Callable[..., None]:
-        _handlers[event_name].append(handler)
+        registered = _handlers[event_name]
+        if handler not in registered:
+            registered.append(handler)
         return handler
 
     return decorator

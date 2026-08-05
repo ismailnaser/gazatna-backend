@@ -34,17 +34,37 @@ def apply_plan_to_student(student, plan=None):
 
 
 def apply_plan_to_students(plan):
+    """Assign a fee plan to matching students without per-row signal storms."""
     grade_names = list(plan.grades.values_list("name", flat=True))
     if not grade_names:
         return 0
     from academics.models import Student
 
-    students = Student.objects.filter(grade_level__in=grade_names, is_active=True)
-    count = 0
-    for student in students:
-        apply_plan_to_student(student, plan)
-        count += 1
-    return count
+    student_ids = list(
+        Student.objects.filter(grade_level__in=grade_names, is_active=True).values_list("id", flat=True)
+    )
+    if not student_ids:
+        return 0
+
+    existing_ids = set(
+        StudentFeeBalance.objects.filter(student_id__in=student_ids).values_list("student_id", flat=True)
+    )
+    missing = [
+        StudentFeeBalance(student_id=student_id, fee_plan=plan, total=plan.total_amount, paid=0)
+        for student_id in student_ids
+        if student_id not in existing_ids
+    ]
+    if missing:
+        StudentFeeBalance.objects.bulk_create(missing, ignore_conflicts=True)
+
+    StudentFeeBalance.objects.filter(student_id__in=student_ids).update(
+        fee_plan=plan,
+        total=plan.total_amount,
+    )
+    from config.events import emit
+
+    emit("finance.changed")
+    return len(student_ids)
 
 
 def get_installments(balance, student=None):
