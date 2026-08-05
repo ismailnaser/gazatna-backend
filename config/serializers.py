@@ -194,6 +194,7 @@ class StudentSerializer(serializers.ModelSerializer):
     paymentStatus = serializers.SerializerMethodField()
     feesPaid = serializers.SerializerMethodField()
     balance = serializers.SerializerMethodField()
+    isActive = serializers.BooleanField(source="is_active", required=False)
 
     documents = serializers.SerializerMethodField()
 
@@ -216,7 +217,7 @@ class StudentSerializer(serializers.ModelSerializer):
             "paymentStatus",
             "feesPaid",
             "balance",
-            "is_active",
+            "isActive",
         ]
         read_only_fields = ["studentNumber", "username", "generatedPassword"]
 
@@ -241,7 +242,7 @@ class StudentSerializer(serializers.ModelSerializer):
         legacy = obj.documents or []
         return [{"id": None, "name": str(x), "url": None} for x in legacy]
 
-    def validate_national_id(self, value):
+    def validate_nationalId(self, value):
         value = str(value or "").strip()
         if not value:
             raise serializers.ValidationError("رقم الهوية مطلوب")
@@ -301,9 +302,19 @@ class StudentSerializer(serializers.ModelSerializer):
             return {"total": float(fb.total), "paid": float(fb.paid), "remaining": float(fb.remaining)}
         return {"total": 0, "paid": 0, "remaining": 0}
 
+    def to_internal_value(self, data):
+        if hasattr(data, "copy"):
+            data = data.copy()
+        else:
+            data = dict(data)
+        if "isActive" not in data and "is_active" in data:
+            data["isActive"] = data.get("is_active")
+        return super().to_internal_value(data)
+
     def to_representation(self, instance):
         data = super().to_representation(instance)
         data["id"] = str(data["id"])
+        data["is_active"] = data.get("isActive")
         if data.get("classId") is not None:
             data["classId"] = str(data["classId"])
         return data

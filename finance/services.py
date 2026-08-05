@@ -29,40 +29,48 @@ def apply_plan_to_student(student, plan=None):
     if plan:
         balance.fee_plan = plan
         balance.total = plan.total_amount
+    else:
+        balance.fee_plan = None
+        if Decimal(str(balance.paid or 0)) <= 0:
+            balance.total = Decimal("0")
     balance.save()
     return balance
 
 
 def apply_plan_to_students(plan):
     """Assign a fee plan to matching students without per-row signal storms."""
-    grade_names = list(plan.grades.values_list("name", flat=True))
-    if not grade_names:
+    from config.events import emit
+
+    if not plan.is_active:
+        StudentFeeBalance.objects.filter(fee_plan=plan).update(fee_plan=None)
+        emit("finance.changed")
         return 0
+
+    grade_names = list(plan.grades.values_list("name", flat=True))
     from academics.models import Student
 
     student_ids = list(
         Student.objects.filter(grade_level__in=grade_names, is_active=True).values_list("id", flat=True)
     )
-    if not student_ids:
-        return 0
 
-    existing_ids = set(
-        StudentFeeBalance.objects.filter(student_id__in=student_ids).values_list("student_id", flat=True)
-    )
-    missing = [
-        StudentFeeBalance(student_id=student_id, fee_plan=plan, total=plan.total_amount, paid=0)
-        for student_id in student_ids
-        if student_id not in existing_ids
-    ]
-    if missing:
-        StudentFeeBalance.objects.bulk_create(missing, ignore_conflicts=True)
+    if student_ids:
+        existing_ids = set(
+            StudentFeeBalance.objects.filter(student_id__in=student_ids).values_list("student_id", flat=True)
+        )
+        missing = [
+            StudentFeeBalance(student_id=student_id, fee_plan=plan, total=plan.total_amount, paid=0)
+            for student_id in student_ids
+            if student_id not in existing_ids
+        ]
+        if missing:
+            StudentFeeBalance.objects.bulk_create(missing, ignore_conflicts=True)
 
-    StudentFeeBalance.objects.filter(student_id__in=student_ids).update(
-        fee_plan=plan,
-        total=plan.total_amount,
-    )
-    from config.events import emit
+        StudentFeeBalance.objects.filter(student_id__in=student_ids).update(
+            fee_plan=plan,
+            total=plan.total_amount,
+        )
 
+    StudentFeeBalance.objects.filter(fee_plan=plan).exclude(student_id__in=student_ids).update(fee_plan=None)
     emit("finance.changed")
     return len(student_ids)
 
@@ -223,7 +231,7 @@ def restore_student_access_after_fees(student):
     return status
 
 
-def build_fee_status(student):
+def build_fee_status(student, *, link_plan=True):
     inactive = not getattr(student, "is_active", True)
 
     if not hasattr(student, "fee_balance"):
@@ -252,7 +260,7 @@ def build_fee_status(student):
             "accessOverrideUntil": None,
         }
 
-    balance = ensure_fee_plan_linked(student) or student.fee_balance
+    balance = (ensure_fee_plan_linked(student) if link_plan else student.fee_balance) or student.fee_balance
     plan = get_fee_plan_for_student(student)
     paid = Decimal(str(balance.paid or 0))
     total = Decimal(str(balance.total or 0))

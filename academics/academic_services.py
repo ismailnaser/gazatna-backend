@@ -92,8 +92,16 @@ def get_current_academic_term():
     )
     if term:
         return term
-    # Read-path activation only — never wipe grades from incidental API traffic.
-    return activate_due_academic_term(year, reset_grades=False)
+    # Read-only: surface the due term without writing is_current on GET traffic.
+    today = timezone.localdate()
+    ordered_terms = list(year.terms.order_by("sort_order", "id"))
+    for candidate in ordered_terms:
+        if candidate.is_closed or candidate.start_date > today:
+            continue
+        if not _all_prior_terms_closed(candidate, ordered_terms):
+            continue
+        return candidate
+    return None
 
 
 def _all_prior_terms_closed(term: AcademicTerm, ordered_terms) -> bool:
@@ -139,6 +147,10 @@ def require_current_academic_term():
         raise serializers.ValidationError(
             {"detail": "لا يوجد فصل دراسي حالي. يرجى ضبط السنة والفصل من إدارة السنوات الدراسية."}
         )
+    if not term.is_current:
+        activated = activate_due_academic_term(term.academic_year, reset_grades=False)
+        if activated:
+            return activated
     return term
 
 
@@ -198,14 +210,14 @@ def _create_default_terms(year, mark_first_current=False):
         name="الفصل الأول",
         sort_order=1,
         start_date=date(start_year, 9, 1),
-        end_date=date(start_year, 1, 31),
+        end_date=date(start_year + 1, 1, 31),
         is_current=mark_first_current,
     )
     AcademicTerm.objects.create(
         academic_year=year,
         name="الفصل الثاني",
         sort_order=2,
-        start_date=date(start_year, 2, 1),
+        start_date=date(start_year + 1, 2, 1),
         end_date=year.end_date,
         is_current=False,
     )
@@ -220,7 +232,7 @@ def set_active_academic_year(year: AcademicYear):
     year.is_active = True
     year.status = AcademicYear.STATUS_ACTIVE
     year.save(update_fields=["is_active", "status"])
-    activate_due_academic_term(year)
+    activate_due_academic_term(year, reset_grades=False)
 
 
 @transaction.atomic
