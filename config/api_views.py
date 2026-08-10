@@ -122,6 +122,8 @@ from finance.services import (
     apply_plan_to_student,
     apply_plan_to_students,
     build_fee_status,
+    count_fee_blocked_students,
+    load_active_fee_plans_by_grade,
     restore_student_access_after_fees,
 )
 from staff.models import StaffType, TeacherClassAssignment, TeacherProfile, TeacherReadAlert
@@ -986,16 +988,14 @@ class AdminAnalyticsView(CachedAPIViewMixin, APIView):
         )
         new_messages = ContactMessage.objects.filter(status="new").count() if can_content else 0
 
-        # Only active students can be blocked from platform access
+        # Only active students can be blocked from platform access.
+        # Never call build_fee_status per-student with DB writes here — that
+        # previously held Passenger workers open long enough to blow NPROC.
         blocked_students = 0
         overdue_students = 0
         if can_finance:
-            active_students = Student.objects.filter(is_active=True).select_related("fee_balance")
-            for s in active_students.iterator():
-                st = build_fee_status(s, link_plan=False)
-                if st.get("blocked"):
-                    blocked_students += 1
-                    overdue_students += 1
+            blocked_students = count_fee_blocked_students()
+            overdue_students = blocked_students
 
         urgent_tasks = []
         if pending_count:
@@ -3886,8 +3886,20 @@ class AdminBlockedStudentsView(APIView):
 
     def get(self, request):
         rows = []
-        for student in Student.objects.select_related("fee_balance").filter(is_active=True).order_by("name"):
-            status = build_fee_status(student)
+        # Read-only: never link/mutate balances on a list endpoint (signal storms).
+        plans_by_grade = load_active_fee_plans_by_grade()
+        students = (
+            Student.objects.select_related("fee_balance")
+            .filter(is_active=True)
+            .order_by("name")
+            .iterator(chunk_size=200)
+        )
+        for student in students:
+            status = build_fee_status(
+                student,
+                link_plan=False,
+                plans_by_grade=plans_by_grade,
+            )
             if not status.get("blocked"):
                 continue
             balance = getattr(student, "fee_balance", None)

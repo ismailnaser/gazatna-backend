@@ -14,7 +14,25 @@ def installment_label(inst) -> str:
     return name if name else f"دفعة {order}"
 
 
-def get_fee_plan_for_student(student):
+def load_active_fee_plans_by_grade() -> dict[str, FeePlan]:
+    """Load every active fee plan once (for list/analytics). Avoids N+1 grade lookups."""
+    by_grade: dict[str, FeePlan] = {}
+    plans = (
+        FeePlan.objects.filter(is_active=True)
+        .prefetch_related("installments", "grades")
+        .order_by("id")
+    )
+    for plan in plans:
+        for grade in plan.grades.all():
+            name = (grade.name or "").strip()
+            if name and name not in by_grade:
+                by_grade[name] = plan
+    return by_grade
+
+
+def get_fee_plan_for_student(student, plans_by_grade: dict[str, FeePlan] | None = None):
+    if plans_by_grade is not None:
+        return plans_by_grade.get(getattr(student, "grade_level", None) or "")
     return (
         FeePlan.objects.filter(is_active=True, grades__name=student.grade_level)
         .prefetch_related("installments")
@@ -75,47 +93,60 @@ def apply_plan_to_students(plan):
     return len(student_ids)
 
 
-def get_installments(balance, student=None):
+def _plan_installments(plan) -> list:
+    if plan is None:
+        return []
+    # Prefer prefetched relation to avoid extra ORDER BY queries in hot loops.
+    cached = getattr(plan, "_prefetched_objects_cache", None)
+    if cached is not None and "installments" in cached:
+        return sorted(plan.installments.all(), key=lambda item: item.order)
+    return list(plan.installments.order_by("order"))
+
+
+def get_installments(balance, student=None, plan=None):
+    if plan is not None:
+        return _plan_installments(plan)
     if student is None and balance.student_id:
         from academics.models import Student
 
         student = Student.objects.filter(id=balance.student_id).first()
     if not student:
         if balance.fee_plan_id:
-            return list(balance.fee_plan.installments.order_by("order"))
+            return _plan_installments(balance.fee_plan)
         return []
-    plan = get_fee_plan_for_student(student)
-    if not plan:
+    resolved = get_fee_plan_for_student(student)
+    if not resolved:
         return []
-    return list(plan.installments.order_by("order"))
+    return _plan_installments(resolved)
 
 
-def ensure_fee_plan_linked(student):
-    """Keep student balance aligned with the active fee plan for their grade."""
+def ensure_fee_plan_linked(student, plans_by_grade: dict[str, FeePlan] | None = None):
+    """Keep student balance aligned with the active fee plan for their grade.
+
+    Uses QuerySet.update() (not model.save) so post_save signals do not fire —
+    otherwise every GET that "links" plans invalidates analytics and storms Passenger.
+    """
     if not hasattr(student, "fee_balance"):
         return None
     balance = student.fee_balance
-    plan = get_fee_plan_for_student(student)
+    plan = get_fee_plan_for_student(student, plans_by_grade)
+    fields: dict = {}
     if not plan:
-        updates = []
         if balance.fee_plan_id is not None:
+            fields["fee_plan_id"] = None
             balance.fee_plan = None
-            updates.append("fee_plan")
         if balance.paid <= 0 and balance.total != 0:
+            fields["total"] = Decimal("0")
             balance.total = Decimal("0")
-            updates.append("total")
-        if updates:
-            balance.save(update_fields=updates)
-        return balance
-    updates = []
-    if balance.fee_plan_id != plan.id:
-        balance.fee_plan = plan
-        updates.append("fee_plan")
-    if balance.total != plan.total_amount:
-        balance.total = plan.total_amount
-        updates.append("total")
-    if updates:
-        balance.save(update_fields=updates)
+    else:
+        if balance.fee_plan_id != plan.id:
+            fields["fee_plan_id"] = plan.id
+            balance.fee_plan = plan
+        if balance.total != plan.total_amount:
+            fields["total"] = plan.total_amount
+            balance.total = plan.total_amount
+    if fields:
+        StudentFeeBalance.objects.filter(pk=balance.pk).update(**fields)
     return balance
 
 
@@ -231,90 +262,106 @@ def restore_student_access_after_fees(student):
     return status
 
 
-def build_fee_status(student, *, link_plan=True):
+def build_fee_status(
+    student,
+    *,
+    link_plan=True,
+    plans_by_grade: dict[str, FeePlan] | None = None,
+    detail: bool = True,
+):
+    """Compute fee gate status.
+
+    Hot paths (analytics / blocked-students list) MUST pass link_plan=False and
+    a shared plans_by_grade map so one request does not fan out into N DB writes
+    and N plan queries (that pattern piled up Passenger workers past NPROC).
+    """
     inactive = not getattr(student, "is_active", True)
+
+    empty = {
+        "blocked": False,
+        "fullyPaid": True,
+        "requiredAmount": 0,
+        "message": "",
+        "currentInstallment": None,
+        "installments": [],
+        "notifications": [],
+        "accessOverrideUntil": None,
+    }
 
     if not hasattr(student, "fee_balance"):
         if inactive:
-            return {
-                "blocked": True,
-                "fullyPaid": True,
-                "requiredAmount": 0,
-                "message": (
-                    "تم إيقاف الوصول إلى حساب الطالب بسبب الرسوم. "
-                    "يرجى مراجعة صفحة المالية أو التواصل مع الإدارة."
-                ),
-                "currentInstallment": None,
-                "installments": [],
-                "notifications": [],
-                "accessOverrideUntil": None,
-            }
-        return {
-            "blocked": False,
-            "fullyPaid": True,
-            "requiredAmount": 0,
-            "message": "",
-            "currentInstallment": None,
-            "installments": [],
-            "notifications": [],
-            "accessOverrideUntil": None,
-        }
+            empty["blocked"] = True
+            empty["message"] = (
+                "تم إيقاف الوصول إلى حساب الطالب بسبب الرسوم. "
+                "يرجى مراجعة صفحة المالية أو التواصل مع الإدارة."
+            )
+        return empty
 
-    balance = (ensure_fee_plan_linked(student) if link_plan else student.fee_balance) or student.fee_balance
-    plan = get_fee_plan_for_student(student)
+    balance = (
+        ensure_fee_plan_linked(student, plans_by_grade) if link_plan else student.fee_balance
+    ) or student.fee_balance
+    plan = get_fee_plan_for_student(student, plans_by_grade)
     paid = Decimal(str(balance.paid or 0))
     total = Decimal(str(balance.total or 0))
-    installments = get_installments(balance, student)
-    notifications = build_installment_notifications(balance, installments, paid)
+    installments = get_installments(balance, student, plan=plan)
+    notifications = build_installment_notifications(balance, installments, paid) if detail else []
+
+    def _pack(*, blocked, fully_paid, required, message, current, override=None, notices=None):
+        return {
+            "blocked": blocked,
+            "fullyPaid": fully_paid,
+            "requiredAmount": required,
+            "message": message,
+            "currentInstallment": current if detail else None,
+            "installments": (
+                [_serialize_installment(inst, paid, installments, date.today()) for inst in installments]
+                if detail
+                else []
+            ),
+            "notifications": notices if notices is not None else notifications,
+            "accessOverrideUntil": override,
+        }
 
     if not plan:
-        return {
-            "blocked": False,
-            "fullyPaid": balance.fees_paid,
-            "requiredAmount": 0,
-            "message": "",
-            "currentInstallment": None,
-            "installments": [],
-            "notifications": [],
-            "accessOverrideUntil": None,
-        }
+        return _pack(
+            blocked=False,
+            fully_paid=balance.fees_paid,
+            required=0,
+            message="",
+            current=None,
+            notices=[],
+        )
 
     override_until = balance.access_override_until
     if override_until and override_until > timezone.now():
-        return {
-            "blocked": False,
-            "fullyPaid": balance.fees_paid,
-            "requiredAmount": 0,
-            "message": "",
-            "currentInstallment": None,
-            "installments": _serialize_installments(balance, student),
-            "notifications": notifications,
-            "accessOverrideUntil": override_until.isoformat(),
-        }
+        return _pack(
+            blocked=False,
+            fully_paid=balance.fees_paid,
+            required=0,
+            message="",
+            current=None,
+            override=override_until.isoformat(),
+        )
 
     if total > 0 and paid >= total:
-        return {
-            "blocked": False,
-            "fullyPaid": True,
-            "requiredAmount": 0,
-            "message": "",
-            "currentInstallment": None,
-            "installments": _serialize_installments(balance, student),
-            "notifications": [],
-            "accessOverrideUntil": None,
-        }
+        return _pack(
+            blocked=False,
+            fully_paid=True,
+            required=0,
+            message="",
+            current=None,
+            notices=[],
+        )
 
     if not installments:
-        return {
-            "blocked": False,
-            "fullyPaid": balance.fees_paid,
-            "requiredAmount": 0,
-            "message": "",
-            "currentInstallment": None,
-            "installments": [],
-            "notifications": [],
-            "accessOverrideUntil": None,
-        }
+        return _pack(
+            blocked=False,
+            fully_paid=balance.fees_paid,
+            required=0,
+            message="",
+            current=None,
+            notices=[],
+        )
 
     today = date.today()
     scheduled = [inst for inst in installments if inst.start_date and inst.end_date]
@@ -344,45 +391,55 @@ def build_fee_status(student, *, link_plan=True):
                 "تم إيقاف الوصول إلى حساب الطالب بسبب الرسوم المستحقة. "
                 f"{message}"
             )
-        return {
-            "blocked": True,
-            "fullyPaid": False,
-            "requiredAmount": float(remaining),
-            "message": message,
-            "currentInstallment": _serialize_installment(blocking, paid, installments, today),
-            "installments": _serialize_installments(balance, student),
-            "notifications": notifications,
-            "accessOverrideUntil": None,
-        }
+        return _pack(
+            blocked=True,
+            fully_paid=False,
+            required=float(remaining),
+            message=message,
+            current=_serialize_installment(blocking, paid, installments, today) if detail else None,
+        )
 
     current = next(
         (i for i in scheduled if i.start_date <= today <= i.end_date),
         scheduled[-1] if scheduled else None,
     )
     if inactive:
-        return {
-            "blocked": True,
-            "fullyPaid": balance.fees_paid,
-            "requiredAmount": 0,
-            "message": (
+        return _pack(
+            blocked=True,
+            fully_paid=balance.fees_paid,
+            required=0,
+            message=(
                 "تم إيقاف الوصول إلى حساب الطالب بسبب الرسوم. "
                 "يرجى مراجعة صفحة المالية أو التواصل مع الإدارة."
             ),
-            "currentInstallment": _serialize_installment(current, paid, installments, today) if current else None,
-            "installments": _serialize_installments(balance, student),
-            "notifications": notifications,
-            "accessOverrideUntil": None,
-        }
-    return {
-        "blocked": False,
-        "fullyPaid": balance.fees_paid,
-        "requiredAmount": 0,
-        "message": "",
-        "currentInstallment": _serialize_installment(current, paid, installments, today) if current else None,
-        "installments": _serialize_installments(balance, student),
-        "notifications": notifications,
-        "accessOverrideUntil": None,
-    }
+            current=_serialize_installment(current, paid, installments, today) if current and detail else None,
+        )
+    return _pack(
+        blocked=False,
+        fully_paid=balance.fees_paid,
+        required=0,
+        message="",
+        current=_serialize_installment(current, paid, installments, today) if current and detail else None,
+    )
+
+
+def count_fee_blocked_students(queryset=None) -> int:
+    """Count blocked active students without mutating balances or N+1 plan queries."""
+    from academics.models import Student
+
+    qs = queryset if queryset is not None else Student.objects.filter(is_active=True)
+    qs = qs.select_related("fee_balance")
+    plans_by_grade = load_active_fee_plans_by_grade()
+    blocked = 0
+    for student in qs.iterator(chunk_size=200):
+        if build_fee_status(
+            student,
+            link_plan=False,
+            plans_by_grade=plans_by_grade,
+            detail=False,
+        ).get("blocked"):
+            blocked += 1
+    return blocked
 
 
 def _serialize_installment(inst, paid, installments, today=None):
