@@ -9,8 +9,12 @@ from accounts.models import User
 from accounts.serializers import UserSerializer
 
 
+from config.throttling import LoginRateThrottle
+
+
 class LoginView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [LoginRateThrottle]
 
     def post(self, request):
         username = str(request.data.get("username", "")).strip()

@@ -158,14 +158,13 @@ if settings.DEBUG:
 
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 else:
-    # cPanel/Passenger: serve uploaded media in production (no separate CDN/alias).
     from django.urls import re_path
-    from django.views.static import serve
+
+    from config.media_views import ProtectedMediaView
 
     urlpatterns += [
         re_path(
             r"^media/(?P<path>.*)$",
-            serve,
-            {"document_root": settings.MEDIA_ROOT},
+            ProtectedMediaView.as_view(),
         ),
     ]

@@ -34,14 +34,16 @@ if _FORCE_SCRIPT and not _FORCE_SCRIPT.startswith("/"):
     _FORCE_SCRIPT = "/" + _FORCE_SCRIPT
 FORCE_SCRIPT_NAME = _FORCE_SCRIPT or None
 
-# Temporary diagnosis on cPanel: set DJANGO_DEBUG=1 in Environment variables
-# (turn off after fixing — never leave debug on public production).
-DEBUG = not IS_PRODUCTION or os.environ.get("DJANGO_DEBUG", "").strip() in ("1", "true", "True")
+# Never enable DEBUG on production — use logging instead.
+DEBUG = not IS_PRODUCTION
 
 SECRET_KEY = config("SECRET_KEY", default="django-insecure-ghazatna-dev-key-change-in-production")
 if IS_PRODUCTION and SECRET_KEY.startswith("django-insecure-"):
-    # Fail loudly in logs rather than silently using the insecure default.
-    pass
+    from django.core.exceptions import ImproperlyConfigured
+
+    raise ImproperlyConfigured(
+        "SECRET_KEY must be set to a secure random value in production (DJANGO_ENV=production)."
+    )
 
 INSTALLED_APPS = [
     "config.apps.ProjectConfig",
@@ -53,6 +55,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
     "rest_framework_simplejwt",
+    "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
     "accounts",
     "academics",
@@ -97,7 +100,7 @@ WSGI_APPLICATION = "config.wsgi.application"
 if IS_PRODUCTION:
     raw_hosts = config(
         "ALLOWED_HOSTS",
-        default="gzs.edu.ps,www.gzs.edu.ps,api.gzs.edu.ps,.edu.ps,localhost,127.0.0.1",
+        default="gzs.edu.ps,www.gzs.edu.ps,django.gzs.edu.ps,localhost,127.0.0.1",
     )
     ALLOWED_HOSTS = [h.strip() for h in raw_hosts.split(",") if h.strip()]
     # Emergency override for diagnosis only: ALLOWED_HOSTS=*
@@ -151,6 +154,11 @@ if IS_PRODUCTION:
         if o.strip()
     ]
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 31_536_000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
 else:
     ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1").split(",")
     DATABASES = {
@@ -184,6 +192,9 @@ STATIC_URL = f"{_prefix}/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = f"{_prefix}/media/"
 MEDIA_ROOT = BASE_DIR / "media"
+# Cap uploads to reduce DoS risk on shared hosting (25 MB per request).
+DATA_UPLOAD_MAX_MEMORY_SIZE = 25 * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = 25 * 1024 * 1024
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # WhiteNoise middleware serves STATIC_ROOT. Avoid Compressed* storage on cPanel:
@@ -257,12 +268,23 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 50,
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "120/min",
+        "user": "300/min",
+        "login": "15/min",
+        "public_post": "10/min",
+    },
 }
 
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(hours=12),
+    "ACCESS_TOKEN_LIFETIME": timedelta(hours=2),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
     "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
 }
 
 CORS_ALLOW_CREDENTIALS = True

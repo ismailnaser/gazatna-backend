@@ -91,6 +91,22 @@ class SiteSettings(models.Model):
     )
     hero_cta_primary = models.CharField(max_length=100, default="ابدأ رحلتك")
     hero_cta_secondary = models.CharField(max_length=100, default="تعرّف علينا")
+    hero_image = models.ImageField(upload_to="site/", blank=True, null=True)
+    hero_image_height = models.CharField(
+        max_length=20,
+        default="100dvh",
+        help_text="ارتفاع قسم الهيرو (مثل 100dvh أو 80vh أو 600px)",
+    )
+    hero_image_object_fit = models.CharField(
+        max_length=20,
+        default="cover",
+        choices=[("cover", "cover"), ("contain", "contain")],
+    )
+    hero_image_object_position = models.CharField(
+        max_length=50,
+        default="center top",
+        help_text="موضع الصورة داخل الإطار (مثل center top)",
+    )
 
     # About section
     about_description = models.TextField(

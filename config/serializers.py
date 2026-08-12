@@ -1,6 +1,8 @@
 from rest_framework import serializers
 import re
 
+from config.media_access import build_media_url
+
 from academics.models import AcademicTerm, AcademicYear, ClassGradebook, ClassSubjectAssignment, Grade, SchoolClass, Student, StudentDocument, Subject, SubjectGrade
 from assignments.models import Homework, HomeworkSubmission, QuestionType, Quiz, QuizQuestion, QuizSubmission, SubjectAnnouncement, SubjectMaterial
 from content.models import (
@@ -235,7 +237,7 @@ class StudentSerializer(serializers.ModelSerializer):
             for d in docs:
                 url = d.file.url if d.file else None
                 if url and request:
-                    url = request.build_absolute_uri(url)
+                    url = build_media_url(request, d.file) or request.build_absolute_uri(d.file.url)
                 result.append({"id": str(d.id), "name": d.name, "url": url})
             return result
         # Fallback to legacy JSON strings
@@ -469,10 +471,7 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
         if not obj.image:
             return None
         request = self.context.get("request")
-        url = obj.image.url
-        if request:
-            return request.build_absolute_uri(url)
-        return url
+        return build_media_url(request, obj.image) or obj.image.url
 
     def _subject_names(self, obj):
         return [s.name for s in obj.teaching_subjects.all()]
@@ -813,13 +812,15 @@ class HomeworkSerializer(serializers.ModelSerializer):
         first = obj.attachment_files.first()
         if first:
             request = self.context.get("request")
-            url = first.file.url
-            return request.build_absolute_uri(url) if request else url
+            return build_media_url(request, first.file) or (
+                request.build_absolute_uri(first.file.url) if request else first.file.url
+            )
         if not obj.attachment:
             return None
         request = self.context.get("request")
-        url = obj.attachment.url
-        return request.build_absolute_uri(url) if request else url
+        return build_media_url(request, obj.attachment) or (
+            request.build_absolute_uri(obj.attachment.url) if request else obj.attachment.url
+        )
 
     def get_attachmentName(self, obj):
         first = obj.attachment_files.first()
@@ -892,8 +893,9 @@ class HomeworkSubmissionSerializer(serializers.ModelSerializer):
         if not obj.attachment:
             return None
         request = self.context.get("request")
-        url = obj.attachment.url
-        return request.build_absolute_uri(url) if request else url
+        return build_media_url(request, obj.attachment) or (
+            request.build_absolute_uri(obj.attachment.url) if request else obj.attachment.url
+        )
 
     def get_attachmentName(self, obj):
         if not obj.attachment:
@@ -1237,8 +1239,9 @@ class PaymentNoticeSerializer(serializers.ModelSerializer):
         if not obj.receipt:
             return None
         request = self.context.get("request")
-        url = obj.receipt.url
-        return request.build_absolute_uri(url) if request else url
+        return build_media_url(request, obj.receipt) or (
+            request.build_absolute_uri(obj.receipt.url) if request else obj.receipt.url
+        )
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -1444,17 +1447,19 @@ class NewsItemSerializer(serializers.ModelSerializer):
         ]
         extra_kwargs = {"image": {"write_only": True}}
 
-    def _absolute_url(self, request, url):
-        if request and url:
-            return request.build_absolute_uri(url)
-        return url
+    def _absolute_url(self, request, file_field):
+        if not file_field:
+            return None
+        return build_media_url(request, file_field) or (
+            request.build_absolute_uri(file_field.url) if request else file_field.url
+        )
 
     def _serialize_image(self, request, image_obj):
         if not image_obj or not image_obj.file:
             return None
         return {
             "id": str(image_obj.id),
-            "url": self._absolute_url(request, image_obj.file.url),
+            "url": self._absolute_url(request, image_obj.file),
             "isCover": bool(image_obj.is_cover),
         }
 
@@ -1470,7 +1475,7 @@ class NewsItemSerializer(serializers.ModelSerializer):
         if obj.image:
             return [{
                 "id": None,
-                "url": self._absolute_url(request, obj.image.url),
+                "url": self._absolute_url(request, obj.image),
                 "isCover": True,
             }]
         return []
@@ -1479,9 +1484,9 @@ class NewsItemSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         cover = obj.images.filter(is_cover=True).first() or obj.images.order_by("order", "id").first()
         if cover and cover.file:
-            return self._absolute_url(request, cover.file.url)
+            return self._absolute_url(request, cover.file)
         if obj.image:
-            return self._absolute_url(request, obj.image.url)
+            return self._absolute_url(request, obj.image)
         return None
 
     def to_representation(self, instance):

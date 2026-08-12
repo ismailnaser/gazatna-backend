@@ -64,6 +64,8 @@ from assignments.attachment_utils import (
     _file_bytes_list,
 )
 from assignments.services import homework_is_open
+from config.media_access import build_media_url
+from config.throttling import PublicPostRateThrottle
 from config.permissions import (
     AdminClassPermission,
     AdminGradePermission,
@@ -166,6 +168,35 @@ def _parse_class_ids(data):
     return []
 
 
+def _validate_teacher_class_ids_response(teacher, class_ids):
+    """Return a 4xx Response if the teacher may not use any class_id, else None."""
+    from academics.grade_scheme_services import teacher_teachable_class_ids
+
+    allowed = set(teacher_teachable_class_ids(teacher))
+    for class_id in class_ids:
+        try:
+            cid = int(class_id)
+        except (TypeError, ValueError):
+            return Response({"detail": "معرّف فصل غير صالح"}, status=status.HTTP_400_BAD_REQUEST)
+        school_class = SchoolClass.objects.filter(id=cid).first()
+        if not school_class:
+            return Response({"detail": "الصف غير موجود"}, status=status.HTTP_404_NOT_FOUND)
+        if cid not in allowed:
+            return Response(
+                {"detail": f"لا تدرّس في فصل {school_class.name}"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+    return None
+
+
+def _teacher_school_class_or_response(teacher, class_id):
+    """Return (school_class, None) or (None, error Response)."""
+    err = _validate_teacher_class_ids_response(teacher, [class_id])
+    if err:
+        return None, err
+    return SchoolClass.objects.filter(id=int(class_id)).first(), None
+
+
 def _publish_homework_grades(homework):
     if homework.grades_visible:
         return
@@ -253,7 +284,7 @@ def _child_for_parent(user):
     student = _linked_student_for_parent(user)
     if not student:
         return None
-    if build_fee_status(student).get("blocked"):
+    if build_fee_status(student, link_plan=False).get("blocked"):
         return None
     return student
 
@@ -403,9 +434,9 @@ class AdminStudentViewSet(viewsets.ModelViewSet):
             parent.delete()
 
     def _serialize_document(self, doc, request):
-        url = doc.file.url if doc.file else None
-        if url and request:
-            url = request.build_absolute_uri(url)
+        from config.media_access import build_media_url
+
+        url = build_media_url(request, doc.file) if doc.file else None
         return {"id": str(doc.id), "name": doc.name, "url": url}
 
     def _student_documents_payload(self, student, request):
@@ -826,7 +857,7 @@ class AdminFinanceViewSet(viewsets.ModelViewSet):
                     "status": n.status,
                     "date": str(n.date),
                     "note": n.note or "",
-                    "receiptUrl": request.build_absolute_uri(n.receipt.url) if n.receipt else None,
+                    "receiptUrl": build_media_url(request, n.receipt) if n.receipt else None,
                     "source": n.source,
                     "reviewedByName": n.reviewed_by.display_name if n.reviewed_by else None,
                 }
@@ -1319,9 +1350,9 @@ class TeacherClassDetailView(APIView):
         if not teacher:
             return Response({"detail": "غير مصرح"}, status=status.HTTP_403_FORBIDDEN)
 
-        school_class = SchoolClass.objects.filter(id=class_id).first()
-        if not school_class:
-            return Response({"detail": "الصف غير موجود"}, status=status.HTTP_404_NOT_FOUND)
+        school_class, err = _teacher_school_class_or_response(teacher, class_id)
+        if err:
+            return err
 
         students = Student.objects.filter(school_class=school_class, is_active=True)
         result = []
@@ -1338,6 +1369,13 @@ class TeacherClassDetailView(APIView):
 
     def patch(self, request, class_id):
         teacher = _teacher_for_user(request.user)
+        if not teacher:
+            return Response({"detail": "غير مصرح"}, status=status.HTTP_403_FORBIDDEN)
+
+        _, err = _teacher_school_class_or_response(teacher, class_id)
+        if err:
+            return err
+
         entries = request.data if isinstance(request.data, list) else request.data.get("entries", [])
         for entry in entries:
             student_id = entry.get("studentId") or entry.get("id")
@@ -1420,6 +1458,9 @@ class TeacherHomeworkViewSet(viewsets.ModelViewSet):
             return Response({"detail": "يرجى تعبئة العنوان والتعليمات وموعد الانتهاء"}, status=status.HTTP_400_BAD_REQUEST)
 
         if class_ids:
+            access_err = _validate_teacher_class_ids_response(teacher, class_ids)
+            if access_err:
+                return access_err
             batch_group_id = uuid.uuid4()
             uploaded = collect_uploaded_files(request)
             file_items = _file_bytes_list(uploaded)
@@ -2115,6 +2156,9 @@ class TeacherQuizViewSet(viewsets.ModelViewSet):
             )
 
         if class_ids:
+            access_err = _validate_teacher_class_ids_response(teacher, class_ids)
+            if access_err:
+                return access_err
             batch_group_id = uuid.uuid4()
             created = []
             for class_id in class_ids:
@@ -2445,6 +2489,9 @@ class TeacherAnnouncementViewSet(viewsets.ModelViewSet):
             )
 
         if class_ids:
+            access_err = _validate_teacher_class_ids_response(teacher, class_ids)
+            if access_err:
+                return access_err
             batch_group_id = uuid.uuid4()
             created = []
             for class_id in class_ids:
@@ -2586,6 +2633,9 @@ class TeacherMaterialViewSet(viewsets.ModelViewSet):
             return Response({"detail": "يرجى إرفاق ملف واحد على الأقل"}, status=status.HTTP_400_BAD_REQUEST)
 
         if class_ids:
+            access_err = _validate_teacher_class_ids_response(teacher, class_ids)
+            if access_err:
+                return access_err
             batch_group_id = uuid.uuid4()
             created = []
             for class_id in class_ids:
@@ -2727,7 +2777,7 @@ class ParentAlertsView(APIView):
         )
 
         alerts = []
-        fee_status = build_fee_status(child)
+        fee_status = build_fee_status(child, link_plan=False)
         for notice in fee_status.get("notifications", []):
             alerts.append({
                 "id": notice["id"],
@@ -2889,7 +2939,7 @@ class ParentStudentView(APIView):
         if not linked:
             return Response({"detail": "لا يوجد طالب مرتبط"}, status=status.HTTP_404_NOT_FOUND)
 
-        fee_status = restore_student_access_after_fees(linked)
+        fee_status = build_fee_status(linked, link_plan=False)
         payload = StudentSerializer(linked, context={"request": request}).data
         access_restricted = bool(fee_status.get("blocked"))
         if access_restricted:
@@ -3031,7 +3081,7 @@ class ParentFeesView(APIView):
         return Response({
             "student": StudentSerializer(child, context={"request": request}).data,
             "notices": PaymentNoticeSerializer(notices, many=True, context={"request": request}).data,
-            "feeStatus": restore_student_access_after_fees(child),
+            "feeStatus": build_fee_status(child, link_plan=False),
         })
 
     def post(self, request):
@@ -3526,7 +3576,7 @@ class PublicSiteSettingsView(CachedAPIViewMixin, APIView):
     cache_prefix = "public:site"
 
     def get(self, request):
-        return self.get_cached(request, lambda: self._serialize(SiteSettings.get()))
+        return self.get_cached(request, lambda: self._serialize(SiteSettings.get(), request))
 
     def _programs(self, s):
         mapping = s.programs_by_grade or {}
@@ -3541,7 +3591,10 @@ class PublicSiteSettingsView(CachedAPIViewMixin, APIView):
             for g in Grade.objects.all().order_by("sort_order", "name")
         ]
 
-    def _serialize(self, s):
+    def _serialize(self, s, request=None):
+        from config.media_access import build_media_url
+
+        hero_image_url = build_media_url(request, s.hero_image) if s.hero_image else None
         return {
             "hero": {
                 "welcome": s.hero_welcome,
@@ -3550,6 +3603,10 @@ class PublicSiteSettingsView(CachedAPIViewMixin, APIView):
                 "description": s.hero_description,
                 "ctaPrimary": s.hero_cta_primary,
                 "ctaSecondary": s.hero_cta_secondary,
+                "imageUrl": hero_image_url,
+                "imageHeight": s.hero_image_height or "100dvh",
+                "imageObjectFit": s.hero_image_object_fit or "cover",
+                "imageObjectPosition": s.hero_image_object_position or "center top",
             },
             "about": {
                 "description": s.about_description,
@@ -3573,16 +3630,50 @@ class PublicSiteSettingsView(CachedAPIViewMixin, APIView):
 
 class AdminSiteSettingsView(APIView):
     permission_classes = [IsSuperAdmin]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get(self, request):
         s = SiteSettings.get()
-        return Response(PublicSiteSettingsView()._serialize(s))
+        return Response(PublicSiteSettingsView()._serialize(s, request))
+
+    def _parse_nested(self, raw):
+        if raw in (None, ""):
+            return {}
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str):
+            import json
+
+            try:
+                parsed = json.loads(raw)
+                return parsed if isinstance(parsed, dict) else {}
+            except json.JSONDecodeError:
+                return {}
+        return {}
 
     def patch(self, request):
         s = SiteSettings.get()
+        is_multipart = request.content_type and "multipart" in request.content_type
         data = request.data
 
-        hero = data.get("hero", {})
+        hero_image = request.FILES.get("heroImage")
+        if hero_image:
+            from assignments.attachment_utils import validate_uploaded_file
+
+            validate_uploaded_file(hero_image)
+            if s.hero_image:
+                s.hero_image.delete(save=False)
+            s.hero_image = hero_image
+
+        remove_flag = str(data.get("removeHeroImage", "")).lower()
+        if remove_flag in ("1", "true", "yes"):
+            if s.hero_image:
+                s.hero_image.delete(save=False)
+                s.hero_image = None
+
+        hero = self._parse_nested(data.get("hero")) if is_multipart else data.get("hero", {})
+        if not isinstance(hero, dict):
+            hero = {}
         if "welcome" in hero:
             s.hero_welcome = hero["welcome"]
         if "schoolName" in hero:
@@ -3595,8 +3686,18 @@ class AdminSiteSettingsView(APIView):
             s.hero_cta_primary = hero["ctaPrimary"]
         if "ctaSecondary" in hero:
             s.hero_cta_secondary = hero["ctaSecondary"]
+        if "imageHeight" in hero:
+            s.hero_image_height = str(hero["imageHeight"]).strip() or "100dvh"
+        if "imageObjectFit" in hero:
+            fit = str(hero["imageObjectFit"]).strip() or "cover"
+            if fit in ("cover", "contain"):
+                s.hero_image_object_fit = fit
+        if "imageObjectPosition" in hero:
+            s.hero_image_object_position = str(hero["imageObjectPosition"]).strip() or "center top"
 
-        about = data.get("about", {})
+        about = self._parse_nested(data.get("about")) if is_multipart else data.get("about", {})
+        if not isinstance(about, dict):
+            about = {}
         if "description" in about:
             s.about_description = about["description"]
         if "vision" in about:
@@ -3604,7 +3705,10 @@ class AdminSiteSettingsView(APIView):
         if "mission" in about:
             s.about_mission = about["mission"]
 
-        contact = data.get("contact", {})
+        contact = self._parse_nested(data.get("contact")) if is_multipart else data.get("contact", {})
+        if not isinstance(contact, dict):
+            contact = {}
+
         if "address" in contact:
             s.contact_address = contact["address"]
         if "phone" in contact:
@@ -3614,13 +3718,24 @@ class AdminSiteSettingsView(APIView):
         if "footerTagline" in contact:
             s.footer_tagline = contact["footerTagline"]
 
-        reg = data.get("registration", {})
+        reg = self._parse_nested(data.get("registration")) if is_multipart else data.get("registration", {})
+        if not isinstance(reg, dict):
+            reg = {}
+
         if "showNotes" in reg:
             s.reg_show_notes = bool(reg["showNotes"])
         if "showBirthDate" in reg:
             s.reg_show_birth_date = bool(reg["showBirthDate"])
 
-        programs = data.get("programs")
+        programs_raw = data.get("programs")
+        if is_multipart and isinstance(programs_raw, str):
+            import json
+
+            try:
+                programs_raw = json.loads(programs_raw)
+            except json.JSONDecodeError:
+                programs_raw = None
+        programs = programs_raw
         if isinstance(programs, list):
             # programs: [{grade, description}]
             next_map = {}
@@ -3634,11 +3749,12 @@ class AdminSiteSettingsView(APIView):
             s.programs_by_grade = next_map
 
         s.save()
-        return Response(PublicSiteSettingsView()._serialize(s))
+        return Response(PublicSiteSettingsView()._serialize(s, request))
 
 
 class PublicAdmissionApplicationView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [PublicPostRateThrottle]
 
     def post(self, request):
         data = request.data
@@ -3660,14 +3776,14 @@ class PublicAdmissionApplicationView(APIView):
             )
         if Student.objects.filter(national_id=national_id).exists():
             return Response(
-                {"detail": "رقم الهوية مستخدم مسبقاً لطالب مسجّل في المدرسة"},
+                {"detail": "لا يمكن إرسال الطلب بهذه البيانات. يرجى التواصل مع المدرسة."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if AdmissionApplication.objects.filter(
             national_id=national_id, status=AdmissionStatus.PENDING
         ).exists():
             return Response(
-                {"detail": "يوجد طلب قبول قيد المراجعة بنفس رقم الهوية"},
+                {"detail": "لا يمكن إرسال الطلب بهذه البيانات. يرجى التواصل مع المدرسة."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -3829,6 +3945,7 @@ class AdminDeleteAdmissionView(APIView):
 
 class PublicContactMessageView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [PublicPostRateThrottle]
 
     def post(self, request):
         name = str(request.data.get("name", "")).strip()

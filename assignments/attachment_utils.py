@@ -1,6 +1,29 @@
 from django.core.files.base import ContentFile
 
+from rest_framework.exceptions import ValidationError
+
+from config.media_access import build_media_url
+
 from assignments.models import Homework, HomeworkAttachment, QuizAnswerAttachment, SubjectMaterial, SubjectMaterialFile
+
+ALLOWED_UPLOAD_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",
+    ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
+    ".txt", ".zip",
+}
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+
+def validate_uploaded_file(uploaded):
+    size = getattr(uploaded, "size", 0) or 0
+    if size > MAX_UPLOAD_BYTES:
+        raise ValidationError("حجم الملف يتجاوز الحد المسموح (25 ميغابايت)")
+    name = (getattr(uploaded, "name", "") or "").lower()
+    ext = ""
+    if "." in name:
+        ext = "." + name.rsplit(".", 1)[-1]
+    if ext and ext not in ALLOWED_UPLOAD_EXTENSIONS:
+        raise ValidationError("نوع الملف غير مسموح")
 
 
 def collect_uploaded_files(request):
@@ -8,7 +31,13 @@ def collect_uploaded_files(request):
     legacy = request.FILES.get("attachment")
     if legacy:
         files.append(legacy)
-    return [f for f in files if f]
+    validated = []
+    for uploaded in files:
+        if not uploaded:
+            continue
+        validate_uploaded_file(uploaded)
+        validated.append(uploaded)
+    return validated
 
 
 def _file_bytes_list(files):
@@ -60,7 +89,7 @@ def remove_attachments(homework, attachment_ids, apply_to_group=False):
 def attachment_payload(att, request=None):
     url = att.file.url
     if request:
-        url = request.build_absolute_uri(url)
+        url = build_media_url(request, att.file) or request.build_absolute_uri(att.file.url)
     name = att.original_name or att.file.name.split("/")[-1]
     return {"id": str(att.id), "url": url, "name": name}
 
