@@ -4025,9 +4025,16 @@ class AdminBlockedStudentsView(APIView):
                 student,
                 link_plan=False,
                 plans_by_grade=plans_by_grade,
+                detail=False,
             )
             if not status.get("blocked"):
                 continue
+            status = build_fee_status(
+                student,
+                link_plan=False,
+                plans_by_grade=plans_by_grade,
+                detail=True,
+            )
             balance = getattr(student, "fee_balance", None)
             current = status.get("currentInstallment") or {}
             total_fees = float(balance.total) if balance else 0
