@@ -3,7 +3,7 @@ from decimal import Decimal
 import re
 import uuid
 
-from django.db.models import Avg, Count, Max, Sum
+from django.db.models import Avg, Count, Max, Prefetch, Sum
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from rest_framework import serializers, status, viewsets
@@ -403,7 +403,10 @@ class AdminUserViewSet(viewsets.ModelViewSet):
 class AdminStudentViewSet(viewsets.ModelViewSet):
     permission_classes = [AdminScopePermission("students")]
     serializer_class = StudentSerializer
-    queryset = Student.objects.select_related("school_class", "fee_balance").all()
+    queryset = Student.objects.select_related("school_class", "fee_balance", "parent").prefetch_related(
+        "uploaded_documents",
+        Prefetch("payment_notices", queryset=PaymentNotice.objects.order_by("-date", "-id")),
+    ).all()
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def _save_documents(self, student, request):

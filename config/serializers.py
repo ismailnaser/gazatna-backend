@@ -230,8 +230,8 @@ class StudentSerializer(serializers.ModelSerializer):
         return getattr(obj, "_generated_password", None)
 
     def get_documents(self, obj):
-        docs = obj.uploaded_documents.all()
-        if docs.exists():
+        docs = list(obj.uploaded_documents.all())
+        if docs:
             request = self.context.get("request")
             result = []
             for d in docs:
@@ -283,7 +283,12 @@ class StudentSerializer(serializers.ModelSerializer):
         return student
 
     def get_paymentStatus(self, obj):
-        latest = obj.payment_notices.order_by("-date").first()
+        prefetched = getattr(obj, "_prefetched_objects_cache", None)
+        if prefetched and "payment_notices" in prefetched:
+            notices = prefetched["payment_notices"]
+            latest = notices[0] if notices else None
+        else:
+            latest = obj.payment_notices.order_by("-date").first()
         if latest:
             return latest.status
         if hasattr(obj, "fee_balance"):
