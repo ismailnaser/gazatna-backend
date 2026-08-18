@@ -3,14 +3,10 @@ from django.core.files.base import ContentFile
 from rest_framework.exceptions import ValidationError
 
 from config.media_access import build_media_url
+from config.upload_limits import ALLOWED_UPLOAD_EXTENSIONS
 
 from assignments.models import Homework, HomeworkAttachment, QuizAnswerAttachment, SubjectMaterial, SubjectMaterialFile
 
-ALLOWED_UPLOAD_EXTENSIONS = {
-    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",
-    ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
-    ".txt", ".zip",
-}
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 

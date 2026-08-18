@@ -296,8 +296,16 @@ def execute_year_end(year: AcademicYear, user, decisions=None, publish_certs=Tru
     executed_rows = []
     outcome_counts = {"promote": 0, "repeat": 0, "graduate": 0}
 
+    student_ids = [row["studentId"] for row in preview["students"]]
+    students_by_id = {
+        str(student.id): student
+        for student in Student.objects.select_related("school_class").filter(id__in=student_ids)
+    }
+
     for row in preview["students"]:
-        student = Student.objects.select_related("school_class").get(id=row["studentId"])
+        student = students_by_id.get(str(row["studentId"]))
+        if student is None:
+            continue
         outcome = _apply_student_action(student, row["finalAction"])
         outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
         executed_rows.append({**row, "executedAction": outcome})

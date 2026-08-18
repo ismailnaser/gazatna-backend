@@ -1,6 +1,8 @@
 from django.conf import settings
 from django.db import models
 
+from config.upload_limits import upload_image_validator
+
 
 class PaymentStatus(models.TextChoices):
     PENDING = "pending", "قيد المراجعة"
@@ -112,7 +114,9 @@ class PaymentNotice(models.Model):
     status = models.CharField(max_length=20, choices=PaymentStatus.choices, default=PaymentStatus.PENDING)
     source = models.CharField(max_length=20, choices=PaymentSource.choices, default=PaymentSource.PARENT)
     note = models.TextField(blank=True)
-    receipt = models.ImageField(upload_to="payments/", blank=True, null=True)
+    receipt = models.ImageField(
+        upload_to="payments/", blank=True, null=True, validators=[upload_image_validator]
+    )
     reviewed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,

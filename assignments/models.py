@@ -2,6 +2,8 @@ import uuid
 
 from django.db import models
 
+from config.upload_limits import upload_file_validator
+
 
 class AssignmentStatus(models.TextChoices):
     ACTIVE = "active", "نشط"
@@ -25,7 +27,9 @@ class Homework(models.Model):
     due_date = models.DateField()
     start_at = models.DateTimeField(null=True, blank=True)
     end_at = models.DateTimeField(null=True, blank=True)
-    attachment = models.FileField(upload_to="homework/attachments/", blank=True, null=True)
+    attachment = models.FileField(
+        upload_to="homework/attachments/", blank=True, null=True, validators=[upload_file_validator]
+    )
     grades_visible = models.BooleanField(default=False)
     max_score = models.DecimalField(max_digits=5, decimal_places=2, default=100)
     group_id = models.UUIDField(default=uuid.uuid4, db_index=True)
@@ -47,7 +51,7 @@ class Homework(models.Model):
 
 class HomeworkAttachment(models.Model):
     homework = models.ForeignKey(Homework, on_delete=models.CASCADE, related_name="attachment_files")
-    file = models.FileField(upload_to="homework/attachments/")
+    file = models.FileField(upload_to="homework/attachments/", validators=[upload_file_validator])
     original_name = models.CharField(max_length=255, blank=True, default="")
     sort_order = models.PositiveSmallIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -65,7 +69,9 @@ class HomeworkSubmission(models.Model):
     homework = models.ForeignKey(Homework, on_delete=models.CASCADE, related_name="submissions")
     student = models.ForeignKey("academics.Student", on_delete=models.CASCADE, related_name="homework_submissions")
     content = models.TextField(blank=True, default="")
-    attachment = models.FileField(upload_to="homework/submissions/", blank=True, null=True)
+    attachment = models.FileField(
+        upload_to="homework/submissions/", blank=True, null=True, validators=[upload_file_validator]
+    )
     score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     max_score = models.DecimalField(max_digits=5, decimal_places=2, default=100)
     teacher_note = models.TextField(blank=True, default="")
@@ -155,7 +161,7 @@ class QuizAnswerAttachment(models.Model):
         QuizSubmission, on_delete=models.CASCADE, related_name="answer_attachments"
     )
     question_id = models.BigIntegerField(db_index=True)
-    file = models.FileField(upload_to="quiz/answer_attachments/")
+    file = models.FileField(upload_to="quiz/answer_attachments/", validators=[upload_file_validator])
     original_name = models.CharField(max_length=255, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -234,7 +240,7 @@ class SubjectMaterial(models.Model):
 
 class SubjectMaterialFile(models.Model):
     material = models.ForeignKey(SubjectMaterial, on_delete=models.CASCADE, related_name="files")
-    file = models.FileField(upload_to="subject_materials/")
+    file = models.FileField(upload_to="subject_materials/", validators=[upload_file_validator])
     original_name = models.CharField(max_length=255, blank=True, default="")
     sort_order = models.PositiveSmallIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)

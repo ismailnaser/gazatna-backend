@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from django.db.models import Avg, Count, F, FloatField
 from django.db.models.functions import Cast, Least
 
@@ -40,13 +42,36 @@ def grade_chart_by_level(queryset=None) -> list[dict]:
     return chart
 
 
+def _year_name_aliases(year: AcademicYear) -> list[str]:
+    name = (year.name or "").strip()
+    aliases = {name}
+    if name:
+        aliases.add(name.replace("/", "-"))
+        aliases.add(name.replace("-", "/"))
+        aliases.add(name.replace("–", "-"))
+        aliases.add(name.replace("—", "-"))
+    return [alias for alias in aliases if alias]
+
+
 def _students_registered_in_year(year: AcademicYear | None, grade_level: str = ""):
+    """Students on roll for an academic year.
+
+    Prefer Enrollment rows. For the active year with no enrollments yet,
+    use the current school roster so analytics do not show 0 while students exist.
+    """
     if not year:
         return Student.objects.none()
-    qs = Student.objects.filter(
-        created_at__date__gte=year.start_date,
-        created_at__date__lte=year.end_date,
-    )
+
+    aliases = _year_name_aliases(year)
+    qs = Student.objects.filter(enrollments__academic_year__in=aliases).distinct()
+    if not qs.exists():
+        if year.is_active:
+            qs = Student.objects.all()
+        else:
+            qs = Student.objects.filter(
+                created_at__gte=year.start_date,
+                created_at__lt=year.end_date + timedelta(days=1),
+            )
     if grade_level:
         qs = qs.filter(grade_level=grade_level)
     return qs

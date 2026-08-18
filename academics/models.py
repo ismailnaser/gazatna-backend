@@ -1,6 +1,8 @@
 from django.conf import settings
 from django.db import models
 
+from config.upload_limits import upload_file_validator
+
 
 class Grade(models.Model):
     name = models.CharField(max_length=50, unique=True)
@@ -84,11 +86,11 @@ class ClassSubjectAssignment(models.Model):
 
 
 class Student(models.Model):
-    name = models.CharField(max_length=200)
+    name = models.CharField(max_length=200, db_index=True)
     student_number = models.CharField(max_length=50, unique=True)
     national_id = models.CharField(max_length=20, blank=True, default="")
     parent_phone = models.CharField(
-        max_length=50, blank=True, default="", verbose_name="رقم جوال ولي الأمر"
+        max_length=50, blank=True, default="", db_index=True, verbose_name="رقم جوال ولي الأمر"
     )
     address = models.CharField(
         max_length=300, blank=True, default="", verbose_name="العنوان"
@@ -126,11 +128,6 @@ class Student(models.Model):
                 condition=models.Q(national_id__gt=""),
                 name="academics_student_national_id_unique",
             ),
-            models.UniqueConstraint(
-                fields=["parent"],
-                condition=models.Q(parent__isnull=False),
-                name="academics_student_unique_login_account",
-            ),
         ]
 
     def __str__(self):
@@ -140,7 +137,7 @@ class Student(models.Model):
 class StudentDocument(models.Model):
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name="uploaded_documents")
     name = models.CharField(max_length=200)
-    file = models.FileField(upload_to="students/documents/")
+    file = models.FileField(upload_to="students/documents/", validators=[upload_file_validator])
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

@@ -407,6 +407,8 @@ class AdminStudentViewSet(viewsets.ModelViewSet):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def _save_documents(self, student, request):
+        from assignments.attachment_utils import validate_uploaded_file
+
         names = request.data.getlist("documentNames") if hasattr(request.data, "getlist") else []
         files = request.FILES.getlist("documentFiles") if hasattr(request.FILES, "getlist") else []
         if not names and not files:
@@ -414,7 +416,9 @@ class AdminStudentViewSet(viewsets.ModelViewSet):
         # Align lengths (ignore extra files or names)
         for i in range(min(len(names), len(files))):
             name = str(names[i]).strip() or "وثيقة"
-            StudentDocument.objects.create(student=student, name=name, file=files[i])
+            uploaded = files[i]
+            validate_uploaded_file(uploaded)
+            StudentDocument.objects.create(student=student, name=name, file=uploaded)
 
     def perform_create(self, serializer):
         student = serializer.save()
@@ -3097,13 +3101,18 @@ class ParentFeesView(APIView):
             return Response({"detail": "مبلغ غير صالح"}, status=status.HTTP_400_BAD_REQUEST)
         if amount <= 0:
             return Response({"detail": "المبلغ يجب أن يكون أكبر من صفر"}, status=status.HTTP_400_BAD_REQUEST)
+        receipt = request.FILES.get("receipt")
+        if receipt:
+            from assignments.attachment_utils import validate_uploaded_file
+
+            validate_uploaded_file(receipt)
         notice = PaymentNotice.objects.create(
             student=child,
             declared_amount=amount,
             amount=amount,
             date=date.today(),
             note=str(request.data.get("note", "")).strip(),
-            receipt=request.FILES.get("receipt"),
+            receipt=receipt,
         )
         return Response(
             PaymentNoticeSerializer(notice, context={"request": request}).data,

@@ -1,5 +1,5 @@
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from django.utils import timezone
 
@@ -88,8 +88,14 @@ def _score_question(question, answer):
         if not pairs:
             return Decimal("0")
         if isinstance(answer, dict):
-            correct = {(p.get("left"), p.get("right")) for p in pairs}
-            student = {(left, right) for left, right in answer.items()}
+            correct = {
+                (_normalize_text(p.get("left")), _normalize_text(p.get("right")))
+                for p in pairs
+            }
+            student = {
+                (_normalize_text(left), _normalize_text(right))
+                for left, right in answer.items()
+            }
             return points if student == correct else Decimal("0")
         if isinstance(answer, list):
             correct = {
@@ -137,7 +143,10 @@ def recalculate_quiz_submission_score(submission, questions):
             continue
         raw = scores.get(str(question.id), scores.get(question.id))
         if raw is not None and raw != "":
-            manual += Decimal(str(raw))
+            try:
+                manual += Decimal(str(raw).strip())
+            except (InvalidOperation, ValueError, TypeError):
+                continue
     return auto + manual
 
 

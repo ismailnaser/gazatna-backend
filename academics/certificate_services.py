@@ -126,8 +126,6 @@ def assigned_subject_names(student, terms=None):
             .distinct()
         )
 
-    from academics.academic_services import get_current_academic_term
-
     term = get_current_academic_term()
     assignment_qs = ClassSubjectAssignment.objects.filter(school_class=student.school_class)
     if term:

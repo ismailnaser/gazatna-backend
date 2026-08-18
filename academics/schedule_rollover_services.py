@@ -112,7 +112,7 @@ def discard_previous_schedule_for_class(class_id, previous_term, schedule_type):
 
     removed = 0
     for schedule in schedules:
-        remaining_ids = list(schedule.school_classes.exclude(id=class_id).values_list("id", flat=True))
+        remaining_ids = [sc.id for sc in schedule.school_classes.all() if str(sc.id) != str(class_id)]
         if not remaining_ids:
             schedule.delete()
         else:
