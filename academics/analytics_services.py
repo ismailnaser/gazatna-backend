@@ -6,6 +6,8 @@ from django.db.models.functions import Cast, Least
 from academics.academic_services import get_active_academic_year
 from academics.models import AcademicYear, Student, SubjectGrade
 
+GRADE_CHART_LEVELS = ["التاسع", "العاشر", "الحادي عشر", "الثاني عشر"]
+
 
 def subject_grades_percent_queryset(queryset=None):
     qs = queryset if queryset is not None else SubjectGrade.objects.all()
@@ -30,15 +32,34 @@ def average_grade_percent(queryset=None) -> float:
 
 def grade_chart_by_level(queryset=None) -> list[dict]:
     qs = subject_grades_percent_queryset(queryset)
+    rows = list(
+        qs.values("student__grade_level").annotate(
+            avg=Avg(
+                Least(
+                    Cast(F("score"), FloatField()) / Cast(F("max_score"), FloatField()) * 100.0,
+                    100.0,
+                )
+            ),
+            n=Count("id"),
+        )
+    )
     chart = []
-    for level in ["التاسع", "العاشر", "الحادي عشر", "الثاني عشر"]:
-        level_qs = qs.filter(student__grade_level__contains=level)
-        if not level_qs.exists():
+    for label in GRADE_CHART_LEVELS:
+        weighted = 0.0
+        total_n = 0
+        for row in rows:
+            grade_level = row.get("student__grade_level") or ""
+            if label not in grade_level:
+                continue
+            count = int(row.get("n") or 0)
+            weighted += float(row.get("avg") or 0) * count
+            total_n += count
+        if total_n <= 0:
             continue
-        value = average_grade_percent(level_qs)
+        value = round(min(100.0, weighted / total_n), 1)
         if value <= 0:
             continue
-        chart.append({"label": level, "value": value})
+        chart.append({"label": label, "value": value})
     return chart
 
 
@@ -64,17 +85,22 @@ def _students_registered_in_year(year: AcademicYear | None, grade_level: str = "
 
     aliases = _year_name_aliases(year)
     qs = Student.objects.filter(enrollments__academic_year__in=aliases).distinct()
-    if not qs.exists():
-        if year.is_active:
-            qs = Student.objects.all()
-        else:
-            qs = Student.objects.filter(
-                created_at__gte=year.start_date,
-                created_at__lt=year.end_date + timedelta(days=1),
-            )
     if grade_level:
         qs = qs.filter(grade_level=grade_level)
-    return qs
+    if qs.exists():
+        return qs
+    if year.is_active:
+        fallback = Student.objects.all()
+        if grade_level:
+            fallback = fallback.filter(grade_level=grade_level)
+        return fallback
+    created = Student.objects.filter(
+        created_at__gte=year.start_date,
+        created_at__lt=year.end_date + timedelta(days=1),
+    )
+    if grade_level:
+        created = created.filter(grade_level=grade_level)
+    return created
 
 
 def _growth_percent(current: int, previous: int) -> float | None:
@@ -121,9 +147,16 @@ def student_enrollment_analytics(grade_level: str = "") -> dict:
     # Registrations per academic year (up to 6 most recent years)
     years = list(AcademicYear.objects.order_by("-start_date", "-id")[:6])
     years.reverse()
+    known_counts = {}
+    if year:
+        known_counts[year.id] = registered
+    if previous_year:
+        known_counts[previous_year.id] = previous_registered
     yearly_chart = []
     for y in years:
-        count = _students_registered_in_year(y, grade_level).count()
+        count = known_counts.get(y.id)
+        if count is None:
+            count = _students_registered_in_year(y, grade_level).count()
         yearly_chart.append({"label": y.name, "value": count})
 
     return {

@@ -26,6 +26,7 @@ def get_previous_operational_term():
                 sort_order__lt=current.sort_order,
                 is_closed=True,
             )
+            .select_related("academic_year")
             .order_by("-sort_order", "-id")
             .first()
         )
@@ -42,7 +43,12 @@ def get_previous_operational_term():
     if not archived_year:
         return None
 
-    return AcademicTerm.objects.filter(academic_year=archived_year).order_by("-sort_order", "-id").first()
+    return (
+        AcademicTerm.objects.filter(academic_year=archived_year)
+        .select_related("academic_year")
+        .order_by("-sort_order", "-id")
+        .first()
+    )
 
 
 def _school_class_label(school_class):
@@ -158,12 +164,10 @@ def adopt_schedules(class_ids, schedule_type, mode, current_term=None, previous_
 
 
 def serialize_schedule_rollover_context(schedule_type=None):
-    from config.serializers import ScheduleSerializer
-
     current_term = get_current_academic_term()
     previous_term = get_previous_operational_term()
 
-    def schedules_for(term):
+    def lite_schedules(term):
         if not term:
             return []
         qs = Schedule.objects.filter(academic_term=term).prefetch_related("school_classes").order_by(
@@ -171,7 +175,22 @@ def serialize_schedule_rollover_context(schedule_type=None):
         )
         if schedule_type in ("exam", "class"):
             qs = qs.filter(schedule_type=schedule_type)
-        return ScheduleSerializer(qs, many=True).data
+        rows = []
+        for schedule in qs:
+            rows.append(
+                {
+                    "id": str(schedule.id),
+                    "name": schedule.name,
+                    "scheduleType": schedule.schedule_type,
+                    "classIds": [],
+                    "classLabels": [_school_class_label(school_class) for school_class in schedule.school_classes.all()],
+                    "entries": [],
+                    "isPublished": schedule.is_published,
+                    "createdAt": schedule.created_at.isoformat() if schedule.created_at else None,
+                    "updatedAt": schedule.updated_at.isoformat() if schedule.updated_at else None,
+                }
+            )
+        return rows
 
     pending = []
     if schedule_type in ("exam", "class"):
@@ -192,7 +211,7 @@ def serialize_schedule_rollover_context(schedule_type=None):
         }
         if previous_term
         else None,
-        "currentSchedules": schedules_for(current_term),
-        "previousSchedules": schedules_for(previous_term),
+        "currentSchedules": [],
+        "previousSchedules": lite_schedules(previous_term),
         "pendingAdoptions": pending,
     }

@@ -1070,9 +1070,11 @@ class AdminAnalyticsView(CachedAPIViewMixin, APIView):
         grade_chart = _build_grade_chart() if can_academics else []
         fees_chart = _build_fees_chart() if can_finance else []
 
+        from academics.academic_services import get_current_academic_term, term_display_name
         from academics.analytics_services import student_enrollment_analytics
 
         enrollment = student_enrollment_analytics()
+        term = get_current_academic_term()
 
         return {
             "avgGrade": avg_grade,
@@ -1087,6 +1089,7 @@ class AdminAnalyticsView(CachedAPIViewMixin, APIView):
             "previousYearRegisteredStudents": enrollment["previousYearRegisteredStudents"],
             "studentsGrowthPercent": enrollment["studentsGrowthPercent"] if can_students else None,
             "academicYear": enrollment["academicYear"],
+            "academicTerm": term_display_name(term) if term else None,
             "previousAcademicYear": enrollment["previousAcademicYear"] if can_students else None,
             "activeStudents": enrollment["activeStudents"],
             "totalStudents": enrollment["totalStudents"],
@@ -1102,6 +1105,14 @@ class AdminAnalyticsDetailsView(APIView):
     permission_classes = [AdminScopePermission("academics", "finance", "students")]
 
     def get(self, request):
+        from config.cache_utils import get_or_set, stable_query_key, versioned_key
+
+        role = getattr(request.user, "role", "") or "anon"
+        key = versioned_key("admin:analytics", "details", role, stable_query_key(request))
+        data = get_or_set(key, lambda: self._build_payload(request), 120)
+        return Response(data)
+
+    def _build_payload(self, request):
         grade_level = (request.query_params.get("gradeLevel") or "").strip()
         from_raw = (request.query_params.get("from") or "").strip()
         to_raw = (request.query_params.get("to") or "").strip()
@@ -1211,8 +1222,7 @@ class AdminAnalyticsDetailsView(APIView):
             pending_qs = pending_qs.filter(grade=grade_level)
         pending_admissions = pending_qs.count() if can_students else 0
 
-        return Response(
-            {
+        return {
                 "avgGrade": avg_grade,
                 "feesCollected": fees_collected,
                 "pendingAdmissions": pending_admissions,
@@ -1235,7 +1245,6 @@ class AdminAnalyticsDetailsView(APIView):
                     "to": str(to_date) if to_date else None,
                 },
             }
-        )
 
 
 class AdminNewsViewSet(viewsets.ModelViewSet):
@@ -1672,13 +1681,14 @@ class AdminGradeSchemeTemplateView(APIView):
     permission_classes = [AdminScopePermission("academics")]
 
     def get(self, request):
-        from academics.academic_services import serialize_academic_context
+        from academics.academic_services import get_current_academic_term, serialize_academic_context
         from academics.grade_scheme_services import (
             get_grade_scheme_template,
             serialize_grade_scheme_template,
         )
 
-        template = get_grade_scheme_template()
+        term = get_current_academic_term()
+        template = get_grade_scheme_template(term=term) if term else None
         return Response(
             {
                 "scheme": serialize_grade_scheme_template(template),
