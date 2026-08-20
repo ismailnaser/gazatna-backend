@@ -100,7 +100,7 @@ WSGI_APPLICATION = "config.wsgi.application"
 if IS_PRODUCTION:
     raw_hosts = config(
         "ALLOWED_HOSTS",
-        default="gzs.edu.ps,www.gzs.edu.ps,django.gzs.edu.ps,localhost,127.0.0.1",
+        default="gzs.edu.ps,www.gzs.edu.ps,django.gzs.edu.ps,www.django.gzs.edu.ps,localhost,127.0.0.1",
     )
     ALLOWED_HOSTS = [h.strip() for h in raw_hosts.split(",") if h.strip()]
     # Emergency override for diagnosis only: ALLOWED_HOSTS=*
