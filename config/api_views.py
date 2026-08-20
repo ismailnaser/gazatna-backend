@@ -1004,101 +1004,176 @@ class AdminAnalyticsView(CachedAPIViewMixin, APIView):
         return Response(data)
 
     def _build_payload(self, request=None):
-        from academics.analytics_services import average_grade_percent
+        """Build analytics payload.
+
+        Optional ``section`` query param limits work to one slice so the UI can
+        lazy-load tabs without computing students + grades + fees together:
+        meta | students | grades | fees | alerts | badge
+        """
+        from academics.academic_services import get_current_academic_term, term_display_name
+        from academics.analytics_services import average_grade_percent, student_enrollment_analytics
 
         role = getattr(getattr(request, "user", None), "role", "") if request else ""
+        section = ""
+        if request is not None:
+            section = (request.query_params.get("section") or "").strip().lower()
+
         can_students = role_has_scope(role, "students")
         can_academics = role_has_scope(role, "academics")
         can_finance = role_has_scope(role, "finance")
         can_content = role_has_scope(role, "content")
 
-        avg_grade = average_grade_percent() if can_academics else 0
-        balances = StudentFeeBalance.objects.all() if can_finance else StudentFeeBalance.objects.none()
-        total_fees = balances.aggregate(t=Sum("total"))["t"] or 0
-        paid_fees = balances.aggregate(p=Sum("paid"))["p"] or 0
-        fees_collected = round(float(paid_fees) / float(total_fees) * 100, 1) if total_fees else 0
+        want_all = section in ("", "all")
+        want_meta = want_all or section == "meta"
+        want_students = want_all or section == "students"
+        want_grades = want_all or section == "grades"
+        want_fees = want_all or section == "fees"
+        want_alerts = want_all or section == "alerts"
+        want_badge = section == "badge"
 
-        pending_count = PaymentNotice.objects.filter(status="pending").count() if can_finance else 0
-
-        inactive_students = Student.objects.filter(is_active=False).count() if can_students else 0
-        pending_admissions = (
-            AdmissionApplication.objects.filter(status="pending").count() if can_students else 0
-        )
-        new_messages = ContactMessage.objects.filter(status="new").count() if can_content else 0
-
-        # Only active students can be blocked from platform access.
-        # Never call build_fee_status per-student with DB writes here — that
-        # previously held Passenger workers open long enough to blow NPROC.
-        blocked_students = 0
-        overdue_students = 0
-        if can_finance:
-            blocked_students = count_fee_blocked_students()
-            overdue_students = blocked_students
-
-        urgent_tasks = []
-        if pending_count:
-            urgent_tasks.append({
-                "id": "t1",
-                "text": f"{pending_count} إشعارات دفع تنتظر الموافقة",
-                "type": "finance",
-            })
-        if blocked_students:
-            urgent_tasks.append({
-                "id": "t_blocked",
-                "text": f"{blocked_students} طلاب محجوبون بسبب الرسوم",
-                "type": "fees_blocked",
-            })
-        if inactive_students:
-            urgent_tasks.append({
-                "id": "t_inactive",
-                "text": f"{inactive_students} طلاب غير نشطين ينتظرون التفعيل",
-                "type": "students_inactive",
-            })
-        if pending_admissions:
-            urgent_tasks.append({
-                "id": "t_admissions",
-                "text": f"{pending_admissions} طلبات قبول/تسجيل جديدة",
-                "type": "admissions",
-            })
-        if new_messages:
-            urgent_tasks.append({
-                "id": "t_messages",
-                "text": f"{new_messages} رسائل جديدة من تواصل معنا",
-                "type": "messages",
-            })
-
-        grade_chart = _build_grade_chart() if can_academics else []
-        fees_chart = _build_fees_chart() if can_finance else []
-
-        from academics.academic_services import get_current_academic_term, term_display_name
-        from academics.analytics_services import student_enrollment_analytics
-
-        enrollment = student_enrollment_analytics()
-        term = get_current_academic_term()
-
-        return {
-            "avgGrade": avg_grade,
-            "feesCollected": fees_collected,
-            "pendingPayments": pending_count,
-            "inactiveStudents": inactive_students,
-            "blockedStudents": blocked_students,
-            "overdueInstallments": overdue_students,
-            "pendingAdmissions": pending_admissions,
-            "newMessages": new_messages,
-            "registeredStudents": enrollment["registeredStudents"],
-            "previousYearRegisteredStudents": enrollment["previousYearRegisteredStudents"],
-            "studentsGrowthPercent": enrollment["studentsGrowthPercent"] if can_students else None,
-            "academicYear": enrollment["academicYear"],
-            "academicTerm": term_display_name(term) if term else None,
-            "previousAcademicYear": enrollment["previousAcademicYear"] if can_students else None,
-            "activeStudents": enrollment["activeStudents"],
-            "totalStudents": enrollment["totalStudents"],
-            "urgentTasks": urgent_tasks,
-            "gradeChart": grade_chart,
-            "feesChart": fees_chart,
-            "studentsChart": enrollment["studentsChart"] if can_students else [],
-            "yearlyStudentsChart": enrollment["yearlyStudentsChart"] if can_students else [],
+        out = {
+            "avgGrade": 0,
+            "feesCollected": 0,
+            "pendingPayments": 0,
+            "inactiveStudents": 0,
+            "blockedStudents": 0,
+            "overdueInstallments": 0,
+            "pendingAdmissions": 0,
+            "newMessages": 0,
+            "registeredStudents": 0,
+            "previousYearRegisteredStudents": 0,
+            "studentsGrowthPercent": None,
+            "academicYear": None,
+            "academicTerm": None,
+            "previousAcademicYear": None,
+            "activeStudents": 0,
+            "totalStudents": 0,
+            "urgentTasks": [],
+            "gradeChart": [],
+            "feesChart": [],
+            "studentsChart": [],
+            "yearlyStudentsChart": [],
+            "section": section or "all",
         }
+
+        if want_badge:
+            pending_count = (
+                PaymentNotice.objects.filter(status="pending").count() if can_finance else 0
+            )
+            out["pendingPayments"] = pending_count
+            return out
+
+        if want_students:
+            enrollment = student_enrollment_analytics()
+            term = get_current_academic_term()
+            out["academicYear"] = enrollment.get("academicYear")
+            out["academicTerm"] = term_display_name(term) if term else None
+            out["registeredStudents"] = enrollment["registeredStudents"]
+            out["previousYearRegisteredStudents"] = enrollment["previousYearRegisteredStudents"]
+            out["studentsGrowthPercent"] = (
+                enrollment["studentsGrowthPercent"] if can_students else None
+            )
+            out["previousAcademicYear"] = (
+                enrollment["previousAcademicYear"] if can_students else None
+            )
+            out["activeStudents"] = enrollment["activeStudents"]
+            out["totalStudents"] = enrollment["totalStudents"]
+            out["studentsChart"] = enrollment["studentsChart"] if can_students else []
+            out["yearlyStudentsChart"] = (
+                enrollment["yearlyStudentsChart"] if can_students else []
+            )
+        elif want_meta:
+            from academics.academic_services import get_active_academic_year
+
+            year = get_active_academic_year()
+            term = get_current_academic_term()
+            out["academicYear"] = year.name if year else None
+            out["academicTerm"] = term_display_name(term) if term else None
+
+        if want_grades and can_academics:
+            out["avgGrade"] = average_grade_percent()
+            out["gradeChart"] = _build_grade_chart()
+
+        if want_fees and can_finance:
+            balances = StudentFeeBalance.objects.all()
+            total_fees = balances.aggregate(t=Sum("total"))["t"] or 0
+            paid_fees = balances.aggregate(p=Sum("paid"))["p"] or 0
+            out["feesCollected"] = (
+                round(float(paid_fees) / float(total_fees) * 100, 1) if total_fees else 0
+            )
+            out["feesChart"] = _build_fees_chart()
+            out["pendingPayments"] = PaymentNotice.objects.filter(status="pending").count()
+
+        if want_alerts:
+            pending_count = (
+                PaymentNotice.objects.filter(status="pending").count() if can_finance else 0
+            )
+            inactive_students = (
+                Student.objects.filter(is_active=False).count() if can_students else 0
+            )
+            pending_admissions = (
+                AdmissionApplication.objects.filter(status="pending").count()
+                if can_students
+                else 0
+            )
+            new_messages = (
+                ContactMessage.objects.filter(status="new").count() if can_content else 0
+            )
+            # Never call build_fee_status per-student with DB writes here —
+            # that previously held Passenger workers open long enough to blow NPROC.
+            blocked_students = count_fee_blocked_students() if can_finance else 0
+
+            out["pendingPayments"] = pending_count
+            out["inactiveStudents"] = inactive_students
+            out["blockedStudents"] = blocked_students
+            out["overdueInstallments"] = blocked_students
+            out["pendingAdmissions"] = pending_admissions
+            out["newMessages"] = new_messages
+
+            urgent_tasks = []
+            if pending_count:
+                urgent_tasks.append(
+                    {
+                        "id": "t1",
+                        "text": f"{pending_count} إشعارات دفع تنتظر الموافقة",
+                        "type": "finance",
+                    }
+                )
+            if blocked_students:
+                urgent_tasks.append(
+                    {
+                        "id": "t_blocked",
+                        "text": f"{blocked_students} طلاب محجوبون بسبب الرسوم",
+                        "type": "fees_blocked",
+                    }
+                )
+            if inactive_students:
+                urgent_tasks.append(
+                    {
+                        "id": "t_inactive",
+                        "text": f"{inactive_students} طلاب غير نشطين ينتظرون التفعيل",
+                        "type": "students_inactive",
+                    }
+                )
+            if pending_admissions:
+                urgent_tasks.append(
+                    {
+                        "id": "t_admissions",
+                        "text": f"{pending_admissions} طلبات قبول/تسجيل جديدة",
+                        "type": "admissions",
+                    }
+                )
+            if new_messages:
+                urgent_tasks.append(
+                    {
+                        "id": "t_messages",
+                        "text": f"{new_messages} رسائل جديدة من تواصل معنا",
+                        "type": "messages",
+                    }
+                )
+            out["urgentTasks"] = urgent_tasks
+
+        return out
 
 
 class AdminAnalyticsDetailsView(APIView):
@@ -1116,6 +1191,11 @@ class AdminAnalyticsDetailsView(APIView):
         grade_level = (request.query_params.get("gradeLevel") or "").strip()
         from_raw = (request.query_params.get("from") or "").strip()
         to_raw = (request.query_params.get("to") or "").strip()
+        section = (request.query_params.get("section") or "").strip().lower()
+        want_all = section in ("", "all")
+        want_students = want_all or section == "students"
+        want_grades = want_all or section == "grades"
+        want_fees = want_all or section == "fees"
 
         from_date = None
         to_date = None
@@ -1128,14 +1208,6 @@ class AdminAnalyticsDetailsView(APIView):
         except ValueError:
             to_date = None
 
-        grades_qs = SubjectGrade.objects.select_related("student")
-        balances_qs = StudentFeeBalance.objects.select_related("student")
-
-        if grade_level:
-            grades_qs = grades_qs.filter(student__grade_level=grade_level)
-            balances_qs = balances_qs.filter(student__grade_level=grade_level)
-
-        # Success rate chart by grade level (or a single grade if filtered)
         from academics.analytics_services import (
             average_grade_percent,
             grade_chart_by_level,
@@ -1147,13 +1219,44 @@ class AdminAnalyticsDetailsView(APIView):
         can_academics = role_has_scope(role, "academics")
         can_finance = role_has_scope(role, "finance")
 
-        grade_chart = grade_chart_by_level(grades_qs) if can_academics else []
+        out = {
+            "avgGrade": 0,
+            "feesCollected": 0,
+            "pendingAdmissions": 0,
+            "registeredStudents": 0,
+            "previousYearRegisteredStudents": 0,
+            "studentsGrowthPercent": None,
+            "academicYear": None,
+            "previousAcademicYear": None,
+            "activeStudents": 0,
+            "inactiveStudents": 0,
+            "totalStudents": 0,
+            "urgentTasks": [],
+            "gradeChart": [],
+            "feesChart": [],
+            "studentsChart": [],
+            "yearlyStudentsChart": [],
+            "section": section or "all",
+            "filters": {
+                "gradeLevel": grade_level or None,
+                "from": str(from_date) if from_date else None,
+                "to": str(to_date) if to_date else None,
+            },
+        }
 
-        fees_chart = []
-        avg_grade = average_grade_percent(grades_qs) if can_academics else 0
-        fees_collected = 0
-        if can_finance:
-            # Fees collected % chart by grade level (or a single grade if filtered)
+        if want_grades and can_academics:
+            grades_qs = SubjectGrade.objects.select_related("student")
+            if grade_level:
+                grades_qs = grades_qs.filter(student__grade_level=grade_level)
+            out["gradeChart"] = grade_chart_by_level(grades_qs)
+            out["avgGrade"] = average_grade_percent(grades_qs)
+
+        if want_fees and can_finance:
+            balances_qs = StudentFeeBalance.objects.select_related("student")
+            if grade_level:
+                balances_qs = balances_qs.filter(student__grade_level=grade_level)
+
+            fees_chart = []
             balance_rows = (
                 balances_qs.values("student__grade_level")
                 .annotate(total=Sum("total"), paid=Sum("paid"))
@@ -1163,7 +1266,6 @@ class AdminAnalyticsDetailsView(APIView):
             paid_by_grade = {row["student__grade_level"]: (row["paid"] or 0) for row in balance_rows}
             total_by_grade = {row["student__grade_level"]: (row["total"] or 0) for row in balance_rows}
 
-            # If a date range is provided, use approved payments in that window for the "paid" numerator.
             if from_date or to_date:
                 notices = PaymentNotice.objects.filter(status="approved").select_related("student")
                 if grade_level:
@@ -1199,52 +1301,46 @@ class AdminAnalyticsDetailsView(APIView):
                     notices = notices.filter(date__lte=to_date)
                 paid_fees = notices.aggregate(p=Sum("amount"))["p"] or 0
 
-            fees_collected = round(float(paid_fees) / float(total_fees) * 100, 1) if total_fees else 0
+            out["feesChart"] = fees_chart
+            out["feesCollected"] = (
+                round(float(paid_fees) / float(total_fees) * 100, 1) if total_fees else 0
+            )
 
-        enrollment = (
-            student_enrollment_analytics(grade_level)
-            if can_students
-            else {
-                "registeredStudents": 0,
-                "previousYearRegisteredStudents": 0,
-                "studentsGrowthPercent": None,
-                "academicYear": None,
-                "previousAcademicYear": None,
-                "activeStudents": 0,
-                "inactiveStudents": 0,
-                "totalStudents": 0,
-                "studentsChart": [],
-                "yearlyStudentsChart": [],
-            }
-        )
-        pending_qs = AdmissionApplication.objects.filter(status="pending")
-        if grade_level:
-            pending_qs = pending_qs.filter(grade=grade_level)
-        pending_admissions = pending_qs.count() if can_students else 0
+        if want_students:
+            enrollment = (
+                student_enrollment_analytics(grade_level)
+                if can_students
+                else {
+                    "registeredStudents": 0,
+                    "previousYearRegisteredStudents": 0,
+                    "studentsGrowthPercent": None,
+                    "academicYear": None,
+                    "previousAcademicYear": None,
+                    "activeStudents": 0,
+                    "inactiveStudents": 0,
+                    "totalStudents": 0,
+                    "studentsChart": [],
+                    "yearlyStudentsChart": [],
+                }
+            )
+            pending_qs = AdmissionApplication.objects.filter(status="pending")
+            if grade_level:
+                pending_qs = pending_qs.filter(grade=grade_level)
+            pending_admissions = pending_qs.count() if can_students else 0
 
-        return {
-                "avgGrade": avg_grade,
-                "feesCollected": fees_collected,
-                "pendingAdmissions": pending_admissions,
-                "registeredStudents": enrollment["registeredStudents"],
-                "previousYearRegisteredStudents": enrollment["previousYearRegisteredStudents"],
-                "studentsGrowthPercent": enrollment["studentsGrowthPercent"],
-                "academicYear": enrollment["academicYear"],
-                "previousAcademicYear": enrollment["previousAcademicYear"],
-                "activeStudents": enrollment["activeStudents"],
-                "inactiveStudents": enrollment["inactiveStudents"],
-                "totalStudents": enrollment["totalStudents"],
-                "urgentTasks": [],
-                "gradeChart": grade_chart,
-                "feesChart": fees_chart,
-                "studentsChart": enrollment["studentsChart"],
-                "yearlyStudentsChart": enrollment["yearlyStudentsChart"],
-                "filters": {
-                    "gradeLevel": grade_level or None,
-                    "from": str(from_date) if from_date else None,
-                    "to": str(to_date) if to_date else None,
-                },
-            }
+            out["pendingAdmissions"] = pending_admissions
+            out["registeredStudents"] = enrollment["registeredStudents"]
+            out["previousYearRegisteredStudents"] = enrollment["previousYearRegisteredStudents"]
+            out["studentsGrowthPercent"] = enrollment["studentsGrowthPercent"]
+            out["academicYear"] = enrollment["academicYear"]
+            out["previousAcademicYear"] = enrollment["previousAcademicYear"]
+            out["activeStudents"] = enrollment["activeStudents"]
+            out["inactiveStudents"] = enrollment["inactiveStudents"]
+            out["totalStudents"] = enrollment["totalStudents"]
+            out["studentsChart"] = enrollment["studentsChart"]
+            out["yearlyStudentsChart"] = enrollment["yearlyStudentsChart"]
+
+        return out
 
 
 class AdminNewsViewSet(viewsets.ModelViewSet):

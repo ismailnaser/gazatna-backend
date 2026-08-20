@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+from cacheops import file_cache
 from django.db.models import Avg, Count, F, FloatField
 from django.db.models.functions import Cast, Least
 
@@ -14,8 +15,7 @@ def subject_grades_percent_queryset(queryset=None):
     return qs.filter(max_score__gt=0)
 
 
-def average_grade_percent(queryset=None) -> float:
-    """Average of (score / max_score * 100), capped at 100 per record."""
+def _average_grade_percent_impl(queryset=None) -> float:
     qs = subject_grades_percent_queryset(queryset)
     avg = qs.aggregate(
         avg=Avg(
@@ -30,7 +30,19 @@ def average_grade_percent(queryset=None) -> float:
     return round(min(100.0, float(avg)), 1)
 
 
-def grade_chart_by_level(queryset=None) -> list[dict]:
+@file_cache.cached(timeout=120)
+def _average_grade_percent_all() -> float:
+    return _average_grade_percent_impl(None)
+
+
+def average_grade_percent(queryset=None) -> float:
+    """Average of (score / max_score * 100), capped at 100 per record."""
+    if queryset is not None:
+        return _average_grade_percent_impl(queryset)
+    return _average_grade_percent_all()
+
+
+def _grade_chart_by_level_impl(queryset=None) -> list[dict]:
     qs = subject_grades_percent_queryset(queryset)
     rows = list(
         qs.values("student__grade_level").annotate(
@@ -61,6 +73,17 @@ def grade_chart_by_level(queryset=None) -> list[dict]:
             continue
         chart.append({"label": label, "value": value})
     return chart
+
+
+@file_cache.cached(timeout=120)
+def _grade_chart_by_level_all() -> list[dict]:
+    return _grade_chart_by_level_impl(None)
+
+
+def grade_chart_by_level(queryset=None) -> list[dict]:
+    if queryset is not None:
+        return _grade_chart_by_level_impl(queryset)
+    return _grade_chart_by_level_all()
 
 
 def _year_name_aliases(year: AcademicYear) -> list[str]:
@@ -109,7 +132,8 @@ def _growth_percent(current: int, previous: int) -> float | None:
     return round(((current - previous) / previous) * 100, 1)
 
 
-def student_enrollment_analytics(grade_level: str = "") -> dict:
+@file_cache.cached(timeout=120)
+def _student_enrollment_analytics(grade_level: str = "") -> dict:
     """Enrollment KPIs for the active academic year vs the previous year."""
     year = get_active_academic_year()
     previous_year = None
@@ -131,7 +155,6 @@ def student_enrollment_analytics(grade_level: str = "") -> dict:
     active_students = base_qs.filter(is_active=True).count()
     inactive_students = base_qs.filter(is_active=False).count()
 
-    # Registrations this year by grade level
     year_regs = _students_registered_in_year(year, grade_level)
     students_chart = []
     for row in (
@@ -144,7 +167,6 @@ def student_enrollment_analytics(grade_level: str = "") -> dict:
             continue
         students_chart.append({"label": label, "value": int(row["value"] or 0)})
 
-    # Registrations per academic year (up to 6 most recent years)
     years = list(AcademicYear.objects.order_by("-start_date", "-id")[:6])
     years.reverse()
     known_counts = {}
@@ -171,3 +193,20 @@ def student_enrollment_analytics(grade_level: str = "") -> dict:
         "studentsChart": students_chart,
         "yearlyStudentsChart": yearly_chart,
     }
+
+
+def student_enrollment_analytics(grade_level: str = "") -> dict:
+    return _student_enrollment_analytics(grade_level or "")
+
+
+def invalidate_cached_average_grade() -> None:
+    _average_grade_percent_all.invalidate()
+
+
+def invalidate_cached_grade_chart() -> None:
+    _grade_chart_by_level_all.invalidate()
+
+
+def invalidate_cached_enrollment_analytics() -> None:
+    # Default (unfiltered) admin dashboard path; filtered keys expire via TTL.
+    _student_enrollment_analytics.invalidate("")

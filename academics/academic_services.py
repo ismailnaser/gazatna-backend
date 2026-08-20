@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 import re
 
+from cacheops import file_cache
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
@@ -292,6 +293,7 @@ def serialize_academic_year(year: AcademicYear):
     }
 
 
+@file_cache.cached(timeout=60)
 def serialize_academic_context():
     year = get_active_academic_year()
     term = get_current_academic_term()
@@ -299,3 +301,7 @@ def serialize_academic_context():
         "academicYear": serialize_academic_year(year) if year else None,
         "currentTerm": serialize_academic_term(term) if term else None,
     }
+
+
+def invalidate_cached_academic_context() -> None:
+    serialize_academic_context.invalidate()

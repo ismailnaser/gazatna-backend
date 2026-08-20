@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from config.cache_utils import invalidate_prefix
+from config.cacheops_helpers import invalidate_hot_file_caches
 from config.events import on
 
 # Cache is rebuilt lazily on the next public GET. Never spawn workers to warm it —
@@ -22,11 +23,13 @@ def _on_staff_changed(**_payload) -> None:
 def _on_academics_changed(**_payload) -> None:
     for prefix in ("public:site", "academic:context", "admin:analytics"):
         invalidate_prefix(prefix)
+    invalidate_hot_file_caches()
 
 
 @on("finance.changed")
 def _on_finance_changed(**_payload) -> None:
     invalidate_prefix("admin:analytics")
+    invalidate_hot_file_caches()
 
 
 @on("site_settings.changed")

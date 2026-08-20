@@ -63,6 +63,8 @@ INSTALLED_APPS = [
     "assignments",
     "finance",
     "content",
+    # ORM queryset cache + file_cache (see CACHEOPS_* settings below).
+    "cacheops",
 ]
 
 MIDDLEWARE = [
@@ -220,6 +222,52 @@ CACHES = {
         "OPTIONS": {"MAX_ENTRIES": 400},
     }
 }
+
+# ---------------------------------------------------------------------------
+# django-cacheops (https://github.com/Suor/django-cacheops)
+# ---------------------------------------------------------------------------
+# - file_cache: works without Redis (safe on shared hosting).
+# - ORM auto-cache: enable by setting CACHEOPS_REDIS or REDIS_URL, e.g.
+#     CACHEOPS_REDIS=redis://127.0.0.1:6379/1
+#   then Restart the Python App.
+# ---------------------------------------------------------------------------
+_CACHEOPS_DIR = BASE_DIR / "cache" / "cacheops"
+_CACHEOPS_DIR.mkdir(parents=True, exist_ok=True)
+FILE_CACHE_DIR = str(_CACHEOPS_DIR)
+FILE_CACHE_TIMEOUT = 60 * 60
+
+_CACHEOPS_REDIS = (
+    os.environ.get("CACHEOPS_REDIS", "").strip()
+    or os.environ.get("REDIS_URL", "").strip()
+)
+CACHEOPS_DEGRADE_ON_FAILURE = True
+# Keep enabled so file_cache decorators work even without Redis.
+CACHEOPS_ENABLED = True
+CACHEOPS_DEFAULTS = {"timeout": 60 * 15}
+
+if _CACHEOPS_REDIS:
+    CACHEOPS_REDIS = _CACHEOPS_REDIS
+    # Prefer app-scoped profiles — avoid '*.*' with non-empty ops (README).
+    CACHEOPS = {
+        "content.sitesettings": {"ops": "all", "timeout": 60 * 30},
+        "content.newsitem": {"ops": ("fetch", "get"), "timeout": 60 * 10},
+        "content.program": {"ops": "all", "timeout": 60 * 30},
+        "content.schoolstat": {"ops": "all", "timeout": 60 * 30},
+        "content.schoolvalue": {"ops": "all", "timeout": 60 * 30},
+        "academics.grade": {"ops": "all", "timeout": 60 * 30},
+        "academics.schoolclass": {"ops": ("fetch", "get"), "timeout": 60 * 15},
+        "academics.subject": {"ops": "all", "timeout": 60 * 30},
+        "academics.academicyear": {"ops": "all", "timeout": 60 * 30},
+        "academics.academicterm": {"ops": ("fetch", "get"), "timeout": 60 * 15},
+        "academics.gradeschemetemplate": {"ops": "all", "timeout": 60 * 30},
+        "staff.stafftype": {"ops": "all", "timeout": 60 * 60},
+        "staff.teacherprofile": {"ops": ("fetch", "get"), "timeout": 60 * 10},
+        "accounts.user": {"ops": "get", "timeout": 60 * 15, "local_get": True},
+    }
+else:
+    # No Redis: skip ORM auto-cache; file_cache still active via CACHEOPS_ENABLED.
+    CACHEOPS_REDIS = {}
+    CACHEOPS = {}
 
 LOGGING = {
     "version": 1,

@@ -21,7 +21,15 @@ def register() -> None:
         return
     _registered = True
 
-    from academics.models import AcademicTerm, AcademicYear, Grade, SchoolClass, Student
+    from academics.models import (
+        AcademicTerm,
+        AcademicYear,
+        Enrollment,
+        Grade,
+        SchoolClass,
+        Student,
+        SubjectGrade,
+    )
     from content.models import (
         NewsItem,
         Program,
@@ -42,7 +50,15 @@ def register() -> None:
 
     _connect(TeacherProfile, "staff.changed")
 
-    for model in (Grade, SchoolClass, Student, AcademicYear, AcademicTerm):
+    for model in (
+        Grade,
+        SchoolClass,
+        Student,
+        AcademicYear,
+        AcademicTerm,
+        SubjectGrade,
+        Enrollment,
+    ):
         _connect(model, "academics.changed")
 
     for model in (FeePlan, PaymentNotice, StudentFeeBalance):

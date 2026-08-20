@@ -32,3 +32,10 @@ PyMySQL>=1.1.0,<2
 # mysqlclient>=2.1.1,<3
 whitenoise>=6.5,<7
 gunicorn>=21.2,<23
+
+# --- Cache (django-cacheops) ---
+# ORM auto-cache needs Redis (set CACHEOPS_REDIS or REDIS_URL on the server).
+# file_cache works without Redis and is used for heavy analytics helpers.
+django-cacheops>=7.1,<8
+redis>=4.0,<6
+funcy>=1.8,<3
