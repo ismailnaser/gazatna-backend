@@ -1631,6 +1631,9 @@ class ScheduleSerializer(serializers.ModelSerializer):
             if teacher_conflict:
                 raise serializers.ValidationError({"entries": teacher_conflict})
 
+        if entries is not None:
+            attrs["entries"] = self._stringify_entries(entries)
+
         return attrs
 
     def create(self, validated_data):
@@ -1655,7 +1658,24 @@ class ScheduleSerializer(serializers.ModelSerializer):
         data = super().to_representation(instance)
         data["id"] = str(data["id"])
         data["classIds"] = [str(class_id) for class_id in instance.school_classes.values_list("id", flat=True)]
+        data["entries"] = self._stringify_entries(data.get("entries"))
         return data
+
+    @staticmethod
+    def _stringify_entries(entries):
+        if not isinstance(entries, list):
+            return []
+        text_keys = ("day", "period", "time", "duration", "subject", "teacher", "room", "notes", "date")
+        normalized = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            row = dict(entry)
+            for key in text_keys:
+                if key in row and row[key] is not None:
+                    row[key] = str(row[key]).strip()
+            normalized.append(row)
+        return normalized
 
 
 class ParentChildSerializer(serializers.Serializer):

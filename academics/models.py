@@ -128,6 +128,11 @@ class Student(models.Model):
                 condition=models.Q(national_id__gt=""),
                 name="academics_student_national_id_unique",
             ),
+            models.UniqueConstraint(
+                fields=["parent"],
+                condition=models.Q(parent__isnull=False),
+                name="academics_student_unique_login_account",
+            ),
         ]
 
     def __str__(self):

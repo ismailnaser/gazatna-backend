@@ -275,7 +275,7 @@ def _linked_student_for_parent(user):
     return (
         Student.objects.filter(parent=user)
         .select_related("school_class", "fee_balance")
-        .order_by("-is_active", "-id")
+        .order_by("-is_active", "id")
         .first()
     )
 
@@ -290,7 +290,7 @@ def _child_for_parent(user):
 
 
 def _subject_label(value):
-    label = (value or "").strip()
+    label = str(value or "").strip()
     return label or "عام"
 
 
@@ -347,7 +347,7 @@ class PublicStatsView(CachedAPIViewMixin, APIView):
     def get(self, request):
         return self.get_cached(
             request,
-            lambda: SchoolStatSerializer(SchoolStat.objects.all(), many=True).data,
+            lambda: SchoolStatSerializer(SchoolStat.public_queryset(), many=True).data,
         )
 
 
@@ -2974,8 +2974,8 @@ class ParentAlertsView(APIView):
                 created_at__gte=recent_cutoff,
             )
             .select_related("teacher")
-            .order_by("-created_at")[:20]
-        )
+            .order_by("-created_at")
+        )[:20]
         for ann in announcements:
             subject = _subject_label(ann.subject)
             alerts.append({
@@ -2992,8 +2992,8 @@ class ParentAlertsView(APIView):
                 created_at__gte=recent_cutoff,
             )
             .select_related("teacher")
-            .order_by("-created_at")[:20]
-        )
+            .order_by("-created_at")
+        )[:20]
         for mat in materials:
             subject = _subject_label(mat.subject)
             alerts.append({
@@ -4297,7 +4297,12 @@ WEEK_DAYS_ORDER = [
 
 
 def _normalize_teacher_name(value):
-    return re.sub(r"\s+", " ", (value or "").strip()).casefold()
+    return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+
+def _schedule_entry_text(value, default=""):
+    text = str(value).strip() if value is not None else ""
+    return text if text else default
 
 
 def _school_class_label(school_class):
@@ -4331,13 +4336,13 @@ class TeacherSchedulesView(APIView):
                 entry_teacher = _normalize_teacher_name(entry.get("teacher") or "")
                 if not entry_teacher or entry_teacher != teacher_name:
                     continue
-                subject = (entry.get("subject") or "").strip()
+                subject = _schedule_entry_text(entry.get("subject"))
                 if not subject:
                     continue
-                day = (entry.get("day") or "").strip()
-                period = (entry.get("period") or "").strip()
-                time = (entry.get("time") or "").strip()
-                duration = (entry.get("duration") or "").strip() or "60"
+                day = _schedule_entry_text(entry.get("day"))
+                period = _schedule_entry_text(entry.get("period"))
+                time = _schedule_entry_text(entry.get("time"))
+                duration = _schedule_entry_text(entry.get("duration"), "60")
                 rows.append(
                     {
                         "id": f"{schedule.id}-{index}-{day}-{time}-{subject}",

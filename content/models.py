@@ -53,6 +53,8 @@ class Program(models.Model):
 
 
 class SchoolStat(models.Model):
+    HIDDEN_KEYS = ("years",)
+
     key = models.CharField(max_length=50, unique=True)
     label = models.CharField(max_length=100)
     value = models.CharField(max_length=50)
@@ -65,6 +67,10 @@ class SchoolStat(models.Model):
         ordering = ["order"]
         verbose_name = "إحصائية"
         verbose_name_plural = "الإحصائيات"
+
+    @classmethod
+    def public_queryset(cls):
+        return cls.objects.exclude(key__in=cls.HIDDEN_KEYS)
 
 
 class SchoolValue(models.Model):

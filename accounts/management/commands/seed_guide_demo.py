@@ -257,9 +257,13 @@ class Command(BaseCommand):
             ("teacher_arabic", "أ. فاطمة النجار", "متخصصة في اللغة العربية وآدابها.", ["لغة عربية"]),
             ("teacher_science", "أ. سامي قاسم", "معلم علوم ومسؤول النشاط العلمي.", ["علوم", "لغة إنجليزية"]),
         ]
+        from staff.models import StaffType
+
+        teacher_type, _ = StaffType.objects.get_or_create(
+            name="معلم", defaults={"is_teacher": True, "sort_order": 1}
+        )
         teachers = []
-        math_subj = next(s for s in subjects if s.name == "رياضيات")
-        for username, display_name, bio, subject_names in specs:
+        for i, (username, display_name, bio, subject_names) in enumerate(specs):
             user, _ = User.objects.update_or_create(
                 username=username,
                 defaults={
@@ -273,7 +277,14 @@ class Command(BaseCommand):
             user.save()
             profile, _ = TeacherProfile.objects.update_or_create(
                 user=user,
-                defaults={"name": display_name, "bio": bio, "experience": bio, "is_public": True},
+                defaults={
+                    "staff_type": teacher_type,
+                    "name": display_name,
+                    "national_id": f"{900000001 + i:09d}",
+                    "bio": bio,
+                    "experience": bio,
+                    "is_public": True,
+                },
             )
             profile.teaching_subjects.set([s for s in subjects if s.name in subject_names])
             teachers.append(profile)
@@ -552,17 +563,17 @@ class Command(BaseCommand):
 
     def _schedules(self, classes, term, teachers):
         entries = [
-            {"day": "السبت", "time": "08:00", "duration": 45, "subject": "رياضيات", "teacher": "أ. محمد الدليل", "period": "1"},
-            {"day": "السبت", "time": "08:50", "duration": 45, "subject": "لغة عربية", "teacher": "أ. فاطمة النجار", "period": "2"},
-            {"day": "السبت", "time": "09:40", "duration": 45, "subject": "علوم", "teacher": "أ. سامي قاسم", "period": "3"},
-            {"day": "الأحد", "time": "08:00", "duration": 45, "subject": "لغة إنجليزية", "teacher": "أ. سامي قاسم", "period": "1"},
-            {"day": "الأحد", "time": "08:50", "duration": 45, "subject": "تربية إسلامية", "teacher": "أ. فاطمة النجار", "period": "2"},
-            {"day": "الأحد", "time": "09:40", "duration": 45, "subject": "رياضيات", "teacher": "أ. محمد الدليل", "period": "3"},
-            {"day": "الاثنين", "time": "08:00", "duration": 45, "subject": "علوم", "teacher": "أ. سامي قاسم", "period": "1"},
-            {"day": "الاثنين", "time": "08:50", "duration": 45, "subject": "لغة عربية", "teacher": "أ. فاطمة النجار", "period": "2"},
-            {"day": "الثلاثاء", "time": "08:00", "duration": 45, "subject": "رياضيات", "teacher": "أ. محمد الدليل", "period": "1"},
-            {"day": "الأربعاء", "time": "08:00", "duration": 45, "subject": "لغة عربية", "teacher": "أ. فاطمة النجار", "period": "1"},
-            {"day": "الخميس", "time": "08:00", "duration": 45, "subject": "تربية إسلامية", "teacher": "أ. فاطمة النجار", "period": "1"},
+            {"day": "السبت", "time": "08:00", "duration": "45", "subject": "رياضيات", "teacher": "أ. محمد الدليل", "period": "1"},
+            {"day": "السبت", "time": "08:50", "duration": "45", "subject": "لغة عربية", "teacher": "أ. فاطمة النجار", "period": "2"},
+            {"day": "السبت", "time": "09:40", "duration": "45", "subject": "علوم", "teacher": "أ. سامي قاسم", "period": "3"},
+            {"day": "الأحد", "time": "08:00", "duration": "45", "subject": "لغة إنجليزية", "teacher": "أ. سامي قاسم", "period": "1"},
+            {"day": "الأحد", "time": "08:50", "duration": "45", "subject": "تربية إسلامية", "teacher": "أ. فاطمة النجار", "period": "2"},
+            {"day": "الأحد", "time": "09:40", "duration": "45", "subject": "رياضيات", "teacher": "أ. محمد الدليل", "period": "3"},
+            {"day": "الاثنين", "time": "08:00", "duration": "45", "subject": "علوم", "teacher": "أ. سامي قاسم", "period": "1"},
+            {"day": "الاثنين", "time": "08:50", "duration": "45", "subject": "لغة عربية", "teacher": "أ. فاطمة النجار", "period": "2"},
+            {"day": "الثلاثاء", "time": "08:00", "duration": "45", "subject": "رياضيات", "teacher": "أ. محمد الدليل", "period": "1"},
+            {"day": "الأربعاء", "time": "08:00", "duration": "45", "subject": "لغة عربية", "teacher": "أ. فاطمة النجار", "period": "1"},
+            {"day": "الخميس", "time": "08:00", "duration": "45", "subject": "تربية إسلامية", "teacher": "أ. فاطمة النجار", "period": "1"},
         ]
         for school_class in classes:
             schedule, _ = Schedule.objects.update_or_create(
@@ -613,13 +624,13 @@ class Command(BaseCommand):
             ("students", "طلاب مسجّلون", "320", "Users"),
             ("teachers", "معلمون", "28", "GraduationCap"),
             ("programs", "برامج تعليمية", "12", "BookOpen"),
-            ("years", "سنوات خبرة", "15", "Award"),
         ]
         for key, label, value, icon in stats:
             SchoolStat.objects.update_or_create(
                 key=key,
                 defaults={"label": label, "value": value, "icon_name": icon, "order": len(stats)},
             )
+        SchoolStat.objects.filter(key="years").delete()
 
         values = [
             ("الانتماء", "نغرس قيمة الانتماء للوطن والمجتمع في قلوب طلابنا."),

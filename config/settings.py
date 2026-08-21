@@ -73,6 +73,7 @@ MIDDLEWARE = [
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
+    "config.middleware.ApiTrailingSlashMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -215,7 +216,8 @@ if FORCE_SCRIPT_NAME:
 
 CACHES = {
     "default": {
-        "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
+        # Swallows lock/permission races so throttle never 500s under load.
+        "BACKEND": "config.cache.ResilientFileBasedCache",
         "LOCATION": BASE_DIR / "cache",
         "TIMEOUT": 300,
         # Keep this small on CageFS — thousands of cache files exhaust inodes/NPROC helpers.
