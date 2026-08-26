@@ -7,7 +7,11 @@ CACHE = {
     "default": {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
         "LOCATION": "login-tests",
-    }
+    },
+    "throttle": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "login-tests-throttle",
+    },
 }
 
 

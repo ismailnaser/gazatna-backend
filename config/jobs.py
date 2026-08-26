@@ -61,11 +61,15 @@ def get_job_status(job_id: str) -> dict[str, Any] | None:
 
 
 def run_async(func: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
-    """Compatibility wrapper — executes synchronously, never forks or threads."""
+    """Compatibility wrapper — executes synchronously, never forks or threads.
+
+    Exceptions are logged at error level (not swallowed silently).
+    """
     close_old_connections()
     try:
         func(*args, **kwargs)
     except Exception:
         logger.exception("Task failed: %s", getattr(func, "__name__", "task"))
+        raise
     finally:
         close_old_connections()

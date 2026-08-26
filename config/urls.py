@@ -2,76 +2,85 @@ from django.contrib import admin
 from django.urls import include, path, re_path
 from rest_framework.routers import DefaultRouter
 
-from config.media_views import ProtectedMediaView
-from config.api_views import (
+from accounts.views import AdminUserViewSet
+from academics.views import (
     AcademicContextView,
-    AdminAnalyticsView,
-    AdminAnalyticsDetailsView,
     AdminAcademicYearViewSet,
-    AdminAdmissionApplicationsView,
-    AdminApproveAdmissionView,
-    AdminDeleteAdmissionView,
-    AdminUnapproveAdmissionView,
-    AdminArchiveContactMessageView,
-    AdminBlockedStudentsView,
-    AdminContactMessagesView,
-    AdminInactiveStudentsView,
-    AdminSiteSettingsView,
-    PublicSiteSettingsView,
-    PublicAdmissionApplicationView,
-    PublicContactMessageView,
+    AdminAnalyticsDetailsView,
+    AdminAnalyticsView,
     AdminClassViewSet,
-    AdminFeePlanViewSet,
     AdminGradeSchemeTemplateView,
     AdminGradeViewSet,
-    AdminFinanceViewSet,
-    AdminNewsViewSet,
+    AdminInactiveStudentsView,
     AdminScheduleViewSet,
     AdminStudentViewSet,
     AdminSubjectViewSet,
-    AdminTeacherViewSet,
-    AdminStaffTypeViewSet,
-    ParentAlertsView,
-    ParentAlertDismissView,
     ParentArchiveCertificatesView,
     ParentArchiveTermGradesView,
     ParentArchiveView,
+    ParentAssessmentsView,
     ParentCertificatesView,
     ParentChildView,
-    ParentFeesView,
-    ParentGradesView,
     ParentGradesNotificationView,
-    ParentAssessmentsView,
-    ParentHomeworkView,
-    ParentHomeworkBySubjectView,
-    ParentHomeworkDetailView,
-    ParentSubjectDetailView,
-    ParentSubjectsView,
-    ParentQuizzesView,
-    ParentQuizReviewView,
+    ParentGradesView,
     ParentSchedulesView,
     ParentStudentView,
-    ParentSubmissionsView,
-    PublicNewsViewSet,
-    PublicProgramViewSet,
-    PublicSchoolValuesView,
-    PublicStatsView,
-    PublicTeachersViewSet,
-    TeacherAssessmentsView,
-    TeacherAlertsView,
     TeacherArchiveClassGradesView,
     TeacherArchiveTermClassesView,
     TeacherArchiveView,
-    TeacherAlertReadView,
     TeacherClassDetailView,
     TeacherClassesView,
-    TeacherAnnouncementViewSet,
     TeacherGradeSchemeView,
+    TeacherSchedulesView,
+)
+from assignments.views import (
+    ParentAlertDismissView,
+    ParentAlertsView,
+    ParentHomeworkBySubjectView,
+    ParentHomeworkDetailView,
+    ParentHomeworkView,
+    ParentQuizReviewView,
+    ParentQuizzesView,
+    ParentSubjectDetailView,
+    ParentSubjectsView,
+    ParentSubmissionsView,
+    TeacherAlertReadView,
+    TeacherAlertsView,
+    TeacherAnnouncementViewSet,
+    TeacherAssessmentsView,
     TeacherHomeworkViewSet,
     TeacherMaterialViewSet,
-    TeacherProfileView,
     TeacherQuizViewSet,
-    TeacherSchedulesView,
+)
+from config.media_views import ProtectedMediaView
+from content.views import (
+    AdminAdmissionApplicationsView,
+    AdminApproveAdmissionView,
+    AdminArchiveContactMessageView,
+    AdminContactMessagesView,
+    AdminDeleteAdmissionView,
+    AdminNewsViewSet,
+    AdminSiteSettingsView,
+    AdminUnapproveAdmissionView,
+    PublicAdmissionApplicationView,
+    PublicContactMessageView,
+    PublicNewsViewSet,
+    PublicProgramViewSet,
+    PublicSchoolValuesView,
+    PublicSiteSettingsView,
+    PublicStatsView,
+)
+from finance.views import (
+    AdminBlockedStudentsView,
+    AdminFeePlanViewSet,
+    AdminFinanceViewSet,
+    ParentFeesView,
+)
+from staff.views import (
+    AdminStaffTypeViewSet,
+    AdminTeacherViewSet,
+    PublicTeachersViewSet,
+    TeacherProfileView,
 )
 
 router = DefaultRouter()
@@ -93,6 +102,7 @@ router.register("teacher/homework", TeacherHomeworkViewSet, basename="teacher-ho
 router.register("teacher/quizzes", TeacherQuizViewSet, basename="teacher-quizzes")
 router.register("teacher/announcements", TeacherAnnouncementViewSet, basename="teacher-announcements")
 router.register("teacher/materials", TeacherMaterialViewSet, basename="teacher-materials")
+router.register("auth/users", AdminUserViewSet, basename="admin-users")
 
 urlpatterns = [
     path("admin/", admin.site.urls),

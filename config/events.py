@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from contextlib import contextmanager
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
 _handlers: dict[str, list[Callable[..., None]]] = defaultdict(list)
+_suppress_depth = 0
 
 
 def on(event_name: str):
@@ -19,7 +21,20 @@ def on(event_name: str):
     return decorator
 
 
+@contextmanager
+def suppress_events():
+    """Temporarily skip emit() — use around bulk saves to avoid N× cache storms."""
+    global _suppress_depth
+    _suppress_depth += 1
+    try:
+        yield
+    finally:
+        _suppress_depth -= 1
+
+
 def emit(event_name: str, **payload: Any) -> None:
+    if _suppress_depth > 0:
+        return
     for handler in list(_handlers.get(event_name, [])):
         try:
             handler(**payload)

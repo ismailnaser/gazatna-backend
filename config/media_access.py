@@ -10,7 +10,7 @@ from urllib.parse import urlencode, urlparse
 
 from django.conf import settings
 
-from accounts.roles import SUPER_ADMIN_ROLE, is_admin_role, role_has_scope
+from accounts.roles import SUPER_ADMIN_ROLE, role_has_scope
 
 # Public assets — no signature required (homepage hero, news, faculty photos).
 PUBLIC_MEDIA_PREFIXES = (
@@ -19,7 +19,7 @@ PUBLIC_MEDIA_PREFIXES = (
     "teachers/",
 )
 
-SIGN_TTL_SECONDS = 60 * 60 * 12
+SIGN_TTL_SECONDS = 60 * 60 * 2  # 2 hours — shorter window if a signed link is forwarded
 
 
 def normalize_media_path(path: str) -> str:
@@ -244,4 +244,6 @@ def user_can_access_media(user, path: str) -> bool:
             return True
         return _can_access_subject_material(user, cleaned)
 
-    return is_admin_role(role)
+    # Default deny: unknown prefixes are not readable by scoped admin roles.
+    # Super admin already returned True above.
+    return False

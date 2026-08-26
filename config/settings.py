@@ -74,6 +74,7 @@ MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "config.middleware.ApiTrailingSlashMiddleware",
+    "config.middleware.AdminLoginRateLimitMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -106,9 +107,12 @@ if IS_PRODUCTION:
         default="gzs.edu.ps,www.gzs.edu.ps,django.gzs.edu.ps,www.django.gzs.edu.ps,localhost,127.0.0.1",
     )
     ALLOWED_HOSTS = [h.strip() for h in raw_hosts.split(",") if h.strip()]
-    # Emergency override for diagnosis only: ALLOWED_HOSTS=*
-    if ALLOWED_HOSTS == ["*"]:
-        ALLOWED_HOSTS = ["*"]
+    # Reject wildcard in production — it disables Host header protection.
+    if not ALLOWED_HOSTS or ALLOWED_HOSTS == ["*"]:
+        raise RuntimeError(
+            "ALLOWED_HOSTS must list explicit hosts in production "
+            "(e.g. gzs.edu.ps,django.gzs.edu.ps). Wildcard '*' is not allowed."
+        )
 
     def _required_env(name: str) -> str:
         value = os.environ.get(name, "").strip()
@@ -214,16 +218,48 @@ if FORCE_SCRIPT_NAME:
 (BASE_DIR / "logs").mkdir(exist_ok=True)
 (BASE_DIR / "media").mkdir(exist_ok=True)
 
+# ---------------------------------------------------------------------------
+# Caches
+# ---------------------------------------------------------------------------
+# default  → small file cache for API response payloads (may cull under pressure)
+# throttle → durable counters for login / public-post / admin-login rate limits
+#            Prefer Redis when available; otherwise DatabaseCache (shared across
+#            all Passenger workers, immune to the 400-entry file cull).
+# ---------------------------------------------------------------------------
 CACHES = {
     "default": {
-        # Swallows lock/permission races so throttle never 500s under load.
         "BACKEND": "config.cache.ResilientFileBasedCache",
         "LOCATION": BASE_DIR / "cache",
         "TIMEOUT": 300,
-        # Keep this small on CageFS — thousands of cache files exhaust inodes/NPROC helpers.
         "OPTIONS": {"MAX_ENTRIES": 400},
-    }
+    },
 }
+
+_THROTTLE_REDIS = (
+    os.environ.get("THROTTLE_REDIS", "").strip()
+    or os.environ.get("CACHEOPS_REDIS", "").strip()
+    or os.environ.get("REDIS_URL", "").strip()
+)
+if _THROTTLE_REDIS:
+    CACHES["throttle"] = {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": _THROTTLE_REDIS,
+        "TIMEOUT": 3600,
+        "KEY_PREFIX": "ghazatna_throttle",
+    }
+else:
+    CACHES["throttle"] = {
+        "BACKEND": "django.core.cache.backends.db.DatabaseCache",
+        "LOCATION": "ghazatna_throttle_cache",
+        "TIMEOUT": 3600,
+        "OPTIONS": {
+            # Keep many counters; this table is tiny (key + value + expires).
+            "MAX_ENTRIES": 10000,
+            "CULL_FREQUENCY": 4,
+        },
+    }
+
+THROTTLE_CACHE_TABLE = "ghazatna_throttle_cache"
 
 # ---------------------------------------------------------------------------
 # django-cacheops (https://github.com/Suor/django-cacheops)
@@ -325,7 +361,9 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": "120/min",
         "user": "300/min",
-        "login": "15/min",
+        # Slightly stricter login window; durable throttle cache backs this.
+        "login": "10/min",
+        "login_hourly": "40/hour",
         "public_post": "10/min",
     },
 }
@@ -335,6 +373,7 @@ SIMPLE_JWT = {
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
+    "USER_AUTHENTICATION_RULE": "accounts.views.user_authentication_rule",
 }
 
 CORS_ALLOW_CREDENTIALS = True

@@ -9,6 +9,32 @@ from assignments.models import Homework, HomeworkAttachment, QuizAnswerAttachmen
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
+# Minimal magic-byte checks (no external lib) — blocks extension spoofing for common types.
+_MAGIC_PREFIXES: list[tuple[bytes, frozenset[str]]] = [
+    (b"\xff\xd8\xff", frozenset({".jpg", ".jpeg"})),
+    (b"\x89PNG\r\n\x1a\n", frozenset({".png"})),
+    (b"GIF87a", frozenset({".gif"})),
+    (b"GIF89a", frozenset({".gif"})),
+    (b"%PDF", frozenset({".pdf"})),
+    (b"BM", frozenset({".bmp"})),
+    (b"PK\x03\x04", frozenset({".zip", ".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt"})),
+]
+
+
+def _sniff_matches_extension(header: bytes, ext: str) -> bool:
+    if ext in {".txt", ".webp"}:
+        # Plain text has no reliable magic; WebP is RIFF....WEBP (checked below).
+        if ext == ".webp":
+            return header.startswith(b"RIFF") and header[8:12] == b"WEBP"
+        return True
+    for magic, allowed_exts in _MAGIC_PREFIXES:
+        if header.startswith(magic):
+            return ext in allowed_exts
+    # Unknown magic for a typed binary extension → reject.
+    if ext in {".jpg", ".jpeg", ".png", ".gif", ".pdf", ".bmp", ".zip", ".docx", ".xlsx", ".pptx"}:
+        return False
+    return True
+
 
 def validate_uploaded_file(uploaded):
     size = getattr(uploaded, "size", 0) or 0
@@ -18,8 +44,20 @@ def validate_uploaded_file(uploaded):
     ext = ""
     if "." in name:
         ext = "." + name.rsplit(".", 1)[-1]
-    if ext and ext not in ALLOWED_UPLOAD_EXTENSIONS:
+    # Require a known extension — bare names previously bypassed the allowlist.
+    if not ext or ext not in ALLOWED_UPLOAD_EXTENSIONS:
         raise ValidationError("نوع الملف غير مسموح")
+
+    header = b""
+    try:
+        pos = uploaded.tell() if hasattr(uploaded, "tell") else None
+        header = uploaded.read(16) or b""
+        if hasattr(uploaded, "seek"):
+            uploaded.seek(pos or 0)
+    except Exception:
+        header = b""
+    if header and not _sniff_matches_extension(header, ext):
+        raise ValidationError("محتوى الملف لا يطابق نوع الامتداد")
 
 
 def collect_uploaded_files(request):

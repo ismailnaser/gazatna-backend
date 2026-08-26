@@ -1,5 +1,6 @@
 from django.core.validators import FileExtensionValidator
 
+# SVG excluded: browsers execute SVG/JS when served inline on the app origin.
 ALLOWED_UPLOAD_EXTENSIONS = {
     ".jpg",
     ".jpeg",
@@ -7,7 +8,6 @@ ALLOWED_UPLOAD_EXTENSIONS = {
     ".gif",
     ".webp",
     ".bmp",
-    ".svg",
     ".pdf",
     ".doc",
     ".docx",

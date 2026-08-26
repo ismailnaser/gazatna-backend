@@ -85,6 +85,78 @@ def teacher_subjects_for_class(teacher, school_class):
     return []
 
 
+def build_teacher_assignment_caches(teachers):
+    """Batch-compute teachableClassIds and subjectClassIds for serializer lists."""
+    teacher_list = list(teachers)
+    if not teacher_list:
+        return {}, {}
+
+    teacher_ids = [t.id for t in teacher_list]
+    assigned_by_teacher = {tid: set() for tid in teacher_ids}
+    for row in TeacherClassAssignment.objects.filter(teacher_id__in=teacher_ids).values_list(
+        "teacher_id", "school_class_id"
+    ):
+        assigned_by_teacher[row[0]].add(row[1])
+
+    subject_ids_by_teacher = {}
+    subject_names_by_id = {}
+    all_subject_ids = set()
+    for teacher in teacher_list:
+        sid_to_name = {subject.id: subject.name for subject in teacher.teaching_subjects.all()}
+        subject_ids_by_teacher[teacher.id] = set(sid_to_name.keys())
+        subject_names_by_id.update(sid_to_name)
+        all_subject_ids.update(sid_to_name.keys())
+
+    all_class_ids = set()
+    for class_ids in assigned_by_teacher.values():
+        all_class_ids.update(class_ids)
+
+    pairs = set()
+    assignments_configured = _class_subject_assignments_configured()
+    if all_class_ids and assignments_configured:
+        for row in ClassSubjectAssignment.objects.filter(school_class_id__in=all_class_ids).values_list(
+            "school_class_id", "subject_id"
+        ):
+            pairs.add(row)
+
+    teachable_cache = {}
+    subject_class_cache = {}
+    for teacher in teacher_list:
+        tid = teacher.id
+        teacher_subject_ids = subject_ids_by_teacher.get(tid, set())
+        assigned_ids = assigned_by_teacher.get(tid, set())
+
+        teachable = []
+        if teacher_subject_ids and assigned_ids:
+            for class_id in assigned_ids:
+                if any((class_id, sid) in pairs for sid in teacher_subject_ids):
+                    teachable.append(class_id)
+            if teachable:
+                teachable = sorted(teachable)
+            elif not assignments_configured:
+                teachable = sorted(assigned_ids)
+            else:
+                teachable = []
+        teachable_cache[tid] = [str(class_id) for class_id in teachable]
+
+        sid_to_name = {sid: subject_names_by_id[sid] for sid in teacher_subject_ids if sid in subject_names_by_id}
+        result = {name: [] for name in sid_to_name.values()}
+        for class_id in assigned_ids:
+            class_id_str = str(class_id)
+            if assignments_configured:
+                for sid, name in sid_to_name.items():
+                    if (class_id, sid) in pairs:
+                        result[name].append(class_id_str)
+            else:
+                for name in result:
+                    result[name].append(class_id_str)
+        for name in result:
+            result[name] = sorted(set(result[name]), key=lambda value: int(value))
+        subject_class_cache[tid] = result
+
+    return teachable_cache, subject_class_cache
+
+
 def teacher_teachable_class_ids(teacher):
     teacher_subject_ids = set(teacher.teaching_subjects.values_list("id", flat=True))
     assigned_ids = teacher_assigned_class_ids(teacher)

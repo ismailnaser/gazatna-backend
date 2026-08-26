@@ -151,23 +151,28 @@ def execute_term_end(year: AcademicYear, user, term_id=None, publish_certs=True)
         raise serializers.ValidationError({"detail": "لا يوجد فصل تالٍ للانتقال إليه"})
 
     from academics.term_operational_services import finalize_term_operational_closure
+    from config.bulk_signals import mute_model_events
+    from config.events import emit
 
-    finalize_term_operational_closure(term)
+    with mute_model_events():
+        finalize_term_operational_closure(term)
 
-    if publish_certs:
-        publish_term_certificates(year, user, term_id=str(term.id))
+        if publish_certs:
+            publish_term_certificates(year, user, term_id=str(term.id))
 
-    now = timezone.now()
-    term.is_closed = True
-    term.is_current = False
-    term.closed_at = now
-    term.save(update_fields=["is_closed", "is_current", "closed_at"])
+        now = timezone.now()
+        term.is_closed = True
+        term.is_current = False
+        term.closed_at = now
+        term.save(update_fields=["is_closed", "is_current", "closed_at"])
 
-    next_activated = False
-    if next_term_activates_on_closure(term, following):
-        set_current_academic_term(following)
-        reset_grade_inputs_for_term(following)
-        next_activated = True
+        next_activated = False
+        if next_term_activates_on_closure(term, following):
+            set_current_academic_term(following)
+            reset_grade_inputs_for_term(following)
+            next_activated = True
+
+    emit("academics.changed", model="AcademicTerm", pk=getattr(term, "pk", None))
 
     return {
         "scope": "term",

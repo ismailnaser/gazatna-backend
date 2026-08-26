@@ -523,11 +523,21 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
         return SchoolClassSerializer(teacher_school_classes(obj), many=True).data
 
     def get_teachableClassIds(self, obj):
+        cache = self.context.get("teachable_class_ids_cache")
+        if cache is not None:
+            cached = cache.get(obj.id)
+            if cached is not None:
+                return cached
         from academics.grade_scheme_services import teacher_teachable_class_ids
 
         return [str(class_id) for class_id in teacher_teachable_class_ids(obj)]
 
     def get_subjectClassIds(self, obj):
+        cache = self.context.get("subject_class_ids_cache")
+        if cache is not None:
+            cached = cache.get(obj.id)
+            if cached is not None:
+                return cached
         from academics.grade_scheme_services import teacher_subject_class_map
 
         return teacher_subject_class_map(obj)
@@ -841,6 +851,9 @@ class HomeworkSerializer(serializers.ModelSerializer):
         return homework_window_status(obj)
 
     def get_submissionCount(self, obj):
+        annotated = getattr(obj, "_submission_count", None)
+        if annotated is not None:
+            return annotated
         return obj.submissions.count()
 
     def to_representation(self, instance):
@@ -984,6 +997,9 @@ class QuizSerializer(serializers.ModelSerializer):
         return quiz_window_status(obj)
 
     def get_submissionCount(self, obj):
+        annotated = getattr(obj, "_submission_count", None)
+        if annotated is not None:
+            return annotated
         return obj.submissions.values("student_id").distinct().count()
 
     def get_attemptCount(self, obj):

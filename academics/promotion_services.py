@@ -255,6 +255,8 @@ def _apply_student_action(student, action: str):
 def execute_year_end(year: AcademicYear, user, decisions=None, publish_certs=True):
     from academics.certificate_services import publish_year_end_certificates
     from academics.term_end_services import get_term_for_year, is_last_term, prior_terms_all_closed
+    from config.bulk_signals import mute_model_events
+    from config.events import emit
 
     if not year.is_active:
         raise serializers.ValidationError({"detail": "يمكن تنفيذ نهاية السنة للسنة النشطة فقط"})
@@ -302,42 +304,44 @@ def execute_year_end(year: AcademicYear, user, decisions=None, publish_certs=Tru
         for student in Student.objects.select_related("school_class").filter(id__in=student_ids)
     }
 
-    for row in preview["students"]:
-        student = students_by_id.get(str(row["studentId"]))
-        if student is None:
-            continue
-        outcome = _apply_student_action(student, row["finalAction"])
-        outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
-        executed_rows.append({**row, "executedAction": outcome})
+    with mute_model_events():
+        for row in preview["students"]:
+            student = students_by_id.get(str(row["studentId"]))
+            if student is None:
+                continue
+            outcome = _apply_student_action(student, row["finalAction"])
+            outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+            executed_rows.append({**row, "executedAction": outcome})
 
-    if publish_certs:
-        from academics.certificate_services import publish_year_end_certificates
+        if publish_certs:
+            publish_year_end_certificates(year, user)
 
-        publish_year_end_certificates(year, user)
+        if current_term and not current_term.is_closed:
+            from academics.term_operational_services import finalize_term_operational_closure
 
-    if current_term and not current_term.is_closed:
-        from academics.term_operational_services import finalize_term_operational_closure
+            finalize_term_operational_closure(current_term)
+            current_term.is_closed = True
+            current_term.is_current = False
+            current_term.closed_at = timezone.now()
+            current_term.save(update_fields=["is_closed", "is_current", "closed_at"])
 
-        finalize_term_operational_closure(current_term)
-        current_term.is_closed = True
-        current_term.is_current = False
-        current_term.closed_at = timezone.now()
-        current_term.save(update_fields=["is_closed", "is_current", "closed_at"])
+        ensure_all_grade_sections()
 
-    ensure_all_grade_sections()
+        year.is_active = False
+        year.status = AcademicYear.STATUS_ARCHIVED
+        year.save(update_fields=["is_active", "status"])
 
-    year.is_active = False
-    year.status = AcademicYear.STATUS_ARCHIVED
-    year.save(update_fields=["is_active", "status"])
+        run = YearEndPromotionRun.objects.create(
+            academic_year=year,
+            new_academic_year=None,
+            executed_by=user if getattr(user, "is_authenticated", False) else None,
+            status=YearEndPromotionRun.STATUS_EXECUTED,
+            summary={"outcomeCounts": outcome_counts, "previewSummary": preview["summary"]},
+            student_results=executed_rows,
+        )
 
-    run = YearEndPromotionRun.objects.create(
-        academic_year=year,
-        new_academic_year=None,
-        executed_by=user if getattr(user, "is_authenticated", False) else None,
-        status=YearEndPromotionRun.STATUS_EXECUTED,
-        summary={"outcomeCounts": outcome_counts, "previewSummary": preview["summary"]},
-        student_results=executed_rows,
-    )
+    emit("academics.changed", model="YearEndPromotionRun", pk=getattr(run, "pk", None))
+    emit("finance.changed", model="YearEndPromotionRun", pk=getattr(run, "pk", None))
 
     return {
         "runId": str(run.id),
