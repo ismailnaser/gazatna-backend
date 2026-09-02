@@ -279,9 +279,17 @@ class PublicSiteSettingsView(CachedAPIViewMixin, APIView):
 
     def _programs(self, s):
         mapping = s.programs_by_grade or {}
+        grades = list(Grade.objects.all().order_by("sort_order", "name"))
+        if grades:
+            return [
+                {"grade": g.name, "description": str(mapping.get(g.name, "") or "")}
+                for g in grades
+            ]
+        # Keep saved blurbs visible even if Grade rows are missing
         return [
-            {"grade": g.name, "description": str(mapping.get(g.name, "") or "")}
-            for g in Grade.objects.all().order_by("sort_order", "name")
+            {"grade": str(name), "description": str(desc or "")}
+            for name, desc in mapping.items()
+            if str(name).strip()
         ]
 
     def _registration_grade_choices(self):
@@ -352,6 +360,7 @@ class AdminSiteSettingsView(APIView):
         return {}
 
     def patch(self, request):
+        from django.core.exceptions import ValidationError as DjangoValidationError
         from rest_framework.exceptions import ValidationError as DRFValidationError
 
         try:
@@ -366,56 +375,91 @@ class AdminSiteSettingsView(APIView):
             else:
                 message = str(detail)
             return Response({"detail": message}, status=status.HTTP_400_BAD_REQUEST)
+        except DjangoValidationError as exc:
+            messages = getattr(exc, "messages", None)
+            message = "; ".join(str(m) for m in messages) if messages else str(exc)
+            return Response({"detail": message or "بيانات الصورة غير صالحة"}, status=status.HTTP_400_BAD_REQUEST)
         except OSError:
             return Response(
                 {"detail": "تعذر حفظ الملف على الخادم. تحقق من صلاحيات مجلد media أو تواصل مع الدعم."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-        except Exception:
-            return Response(
-                {"detail": "تعذر معالجة صورة الصفحة الرئيسية. جرّب صورة JPG أو PNG أصغر حجماً."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
-    def _optimize_hero_image(self, uploaded):
-        """Downscale large hero photos so Passenger workers do not OOM on shared hosting."""
+    def _hero_safe_name(self, uploaded, force_ext=None):
+        import re
+
+        raw = (getattr(uploaded, "name", "") or "hero").replace("\\", "/").split("/")[-1]
+        stem, dot, ext = raw.rpartition(".")
+        if not dot:
+            stem, ext = raw, "jpg"
+        stem = re.sub(r"[^A-Za-z0-9_-]+", "-", stem).strip("-_") or "hero"
+        ext = (force_ext or ext or "jpg").lower().lstrip(".")
+        if ext not in {"jpg", "jpeg", "png", "webp", "gif", "bmp"}:
+            ext = "jpg"
+        if ext == "jpeg":
+            ext = "jpg"
+        return f"{stem[:60]}.{ext}"
+
+    def _prepare_hero_image(self, uploaded):
+        """
+        Copy upload bytes into a fresh InMemory file.
+        Avoids closed TemporaryUploadedFile after PIL, and skips heavy
+        re-encode for already-small images (common hero assets).
+        """
         from io import BytesIO
 
         from django.core.files.uploadedfile import InMemoryUploadedFile
-        from PIL import Image, UnidentifiedImageError
+        from rest_framework.exceptions import ValidationError as DRFValidationError
 
         try:
             uploaded.seek(0)
         except Exception:
             pass
-
+        data = uploaded.read()
         try:
-            with Image.open(uploaded) as im:
-                im = im.convert("RGB")
-                max_edge = 1920
-                w, h = im.size
-                if max(w, h) > max_edge:
-                    scale = max_edge / float(max(w, h))
-                    im = im.resize(
-                        (max(1, int(w * scale)), max(1, int(h * scale))),
-                        Image.Resampling.LANCZOS,
-                    )
-                buf = BytesIO()
-                im.save(buf, format="JPEG", quality=85, optimize=True)
-                buf.seek(0)
-        except UnidentifiedImageError as exc:
-            from rest_framework.exceptions import ValidationError as DRFValidationError
+            uploaded.seek(0)
+        except Exception:
+            pass
 
-            raise DRFValidationError("تعذر قراءة الصورة. استخدم ملف JPG أو PNG صالح.") from exc
+        if not data:
+            raise DRFValidationError("ملف الصورة فارغ أو لم يصل إلى الخادم.")
 
-        base = (getattr(uploaded, "name", "") or "hero").rsplit(".", 1)[0] or "hero"
-        name = f"{base}.jpg"
+        content_type = getattr(uploaded, "content_type", "") or "application/octet-stream"
+        name = self._hero_safe_name(uploaded)
+        # Re-encode only large uploads — small JPG/PNG should save as-is.
+        if len(data) > 900_000:
+            try:
+                from PIL import Image, UnidentifiedImageError
+
+                with Image.open(BytesIO(data)) as im:
+                    im = im.convert("RGB")
+                    max_edge = 1920
+                    w, h = im.size
+                    resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+                    if max(w, h) > max_edge:
+                        scale = max_edge / float(max(w, h))
+                        im = im.resize(
+                            (max(1, int(w * scale)), max(1, int(h * scale))),
+                            resample,
+                        )
+                    out = BytesIO()
+                    im.save(out, format="JPEG", quality=85, optimize=True)
+                    data = out.getvalue()
+                name = self._hero_safe_name(uploaded, force_ext="jpg")
+                content_type = "image/jpeg"
+            except UnidentifiedImageError as exc:
+                raise DRFValidationError("تعذر قراءة الصورة. استخدم ملف JPG أو PNG صالح.") from exc
+            except Exception:
+                # Keep original bytes if resize fails — do not block the upload.
+                pass
+
+        buf = BytesIO(data)
         return InMemoryUploadedFile(
             buf,
             field_name="heroImage",
             name=name,
-            content_type="image/jpeg",
-            size=buf.getbuffer().nbytes,
+            content_type=content_type,
+            size=len(data),
             charset=None,
         )
 
@@ -429,9 +473,12 @@ class AdminSiteSettingsView(APIView):
             from assignments.attachment_utils import validate_uploaded_file
 
             validate_uploaded_file(hero_image)
-            hero_image = self._optimize_hero_image(hero_image)
+            hero_image = self._prepare_hero_image(hero_image)
             if s.hero_image:
-                s.hero_image.delete(save=False)
+                try:
+                    s.hero_image.delete(save=False)
+                except Exception:
+                    pass
             s.hero_image = hero_image
 
         remove_flag = str(data.get("removeHeroImage", "")).lower()

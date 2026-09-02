@@ -679,7 +679,7 @@ class Command(BaseCommand):
             )
 
         questions = list(quiz.questions.order_by("order"))
-        if guide_student and questions:
+        if guide_student and len(questions) >= 3:
             QuizSubmission.objects.update_or_create(
                 quiz=quiz,
                 student=guide_student,
@@ -697,6 +697,26 @@ class Command(BaseCommand):
                     "teacher_note": "إجابة المقال جيدة.",
                     "graded_at": now,
                     "time_spent_seconds": 480,
+                },
+            )
+        elif guide_student and questions:
+            answers = []
+            for q in questions:
+                if q.question_type == "essay":
+                    answers.append({"questionId": q.id, "text": "إجابة تجريبية."})
+                else:
+                    answers.append({"questionId": q.id, "selectedIndex": 0})
+            QuizSubmission.objects.update_or_create(
+                quiz=quiz,
+                student=guide_student,
+                attempt_number=1,
+                defaults={
+                    "answers": answers,
+                    "auto_score": Decimal("5"),
+                    "score": Decimal("5"),
+                    "max_score": quiz.max_score or Decimal("10"),
+                    "graded_at": now,
+                    "time_spent_seconds": 300,
                 },
             )
 
@@ -781,20 +801,50 @@ class Command(BaseCommand):
 
     def _public_content(self, grades):
         news_items = [
-            ("افتتاح معمل الحاسوب الجديد", "أخبار", "تم افتتاح معمل حاسوب مجهّز بأحدث الأجهزة لطلاب المرحلة الابتدائية."),
-            ("يوم التطوع المدرسي", "فعاليات", "شارك الطلاب في حملة تجميل ساحة المدرسة وتشجير الحديقة."),
-            ("فوز فريق الروبوتيك", "إنجازات", "حقق فريق غَزتنا للروبوتيك المركز الأول في المسابقة المحلية."),
-            ("ورشة القراءة الإبداعية", "فعاليات", "ورشة أسبوعية لتعزيز مهارات القراءة والكتابة."),
+            (
+                "افتتاح معمل الحاسوب الجديد",
+                "أخبار",
+                "تم افتتاح معمل حاسوب مجهّز بأحدث الأجهزة لطلاب المرحلة الابتدائية، مع ورش تعريفية للأهل.",
+            ),
+            (
+                "يوم التطوع المدرسي",
+                "فعاليات",
+                "شارك الطلاب في حملة تجميل ساحة المدرسة وتشجير الحديقة بالتعاون مع مجلس أولياء الأمور.",
+            ),
+            (
+                "فوز فريق الروبوتيك",
+                "إنجازات",
+                "حقق فريق غَزتنا للروبوتيك المركز الأول في المسابقة المحلية بعد مشروع ابتكاري مميز.",
+            ),
+            (
+                "ورشة القراءة الإبداعية",
+                "فعاليات",
+                "ورشة أسبوعية لتعزيز مهارات القراءة والكتابة والتعبير الشفوي لدى طلاب الصفوف الأولى.",
+            ),
+            (
+                "معرض العلوم السنوي",
+                "فعاليات",
+                "عرض طلاب العلوم تجاربهم ومشاريعهم أمام الأهالي والزوار في قاعة الأنشطة.",
+            ),
+            (
+                "تكريم المتفوقين",
+                "إنجازات",
+                "حفل تكريم للطلاب المتفوقين في الفصل الدراسي مع شهادات تقدير وهدايا رمزية.",
+            ),
         ]
         for i, (title, category, desc) in enumerate(news_items):
             NewsItem.objects.update_or_create(
                 title=title,
                 defaults={
                     "description": desc,
-                    "body": f"{desc}\n\nتفاصيل إضافية ضمن برنامج غَزتنا التعليمي.",
-                    "date": timezone.localdate() - timedelta(days=i * 5),
+                    "body": (
+                        f"{desc}\n\n"
+                        "تفاصيل إضافية ضمن برنامج غَزتنا التعليمي، مع دعوة لأولياء الأمور "
+                        "للمتابعة عبر المنصة الرقمية للاطلاع على الجداول والأنشطة."
+                    ),
+                    "date": timezone.localdate() - timedelta(days=i * 4),
                     "category": category,
-                    "featured": i == 0,
+                    "featured": i < 2,
                     "is_published": True,
                 },
             )
@@ -803,6 +853,9 @@ class Command(BaseCommand):
             ("المرحلة الابتدائية", "الصفوف 1-3", "تعليم أساسي متكامل يجمع بين المهارات الأكاديمية والقيم."),
             ("التميز في الرياضيات", "جميع المراحل", "برنامج تعزيزي لطلاب الرياضيات المتميزين."),
             ("اللغة والإبداع", "ابتدائي", "تنمية مهارات القراءة والكتابة والتعبير."),
+            ("العلوم والتجارب", "الصفوف 2-3", "مختبرات وأنشطة عملية تعزّز حب الاستكشاف."),
+            ("اللغة الإنجليزية المكثّفة", "جميع المراحل", "حصص محادثة وأنشطة تواصل يومية."),
+            ("القيم والانتماء", "جميع المراحل", "برامج تربوية تعزّز الهوية والقيم المجتمعية."),
         ]
         for i, (title, grade_label, desc) in enumerate(programs):
             Program.objects.update_or_create(
@@ -816,9 +869,10 @@ class Command(BaseCommand):
             )
 
         stats = [
-            ("students", "طلاب مسجّلون", "18", "Users"),
-            ("teachers", "معلمون", "6", "GraduationCap"),
-            ("programs", "برامج تعليمية", "3", "BookOpen"),
+            ("students", "طلاب مسجّلون", "320", "Users"),
+            ("teachers", "معلمون", "28", "GraduationCap"),
+            ("programs", "برامج تعليمية", "12", "Star"),
+            ("satisfaction", "رضا الأهالي", "98%", "Star"),
         ]
         for i, (key, label, value, icon) in enumerate(stats):
             SchoolStat.objects.update_or_create(
@@ -831,6 +885,7 @@ class Command(BaseCommand):
             ("الانتماء", "نغرس قيمة الانتماء للوطن والمجتمع في قلوب طلابنا."),
             ("الإبداع", "نشجّع التفكير الإبداعي وحل المشكلات."),
             ("التميز", "نسعى للتميز الأكاديمي مع مراعاة الفروق الفردية."),
+            ("التعاون", "نبني علاقة شراكة حقيقية بين المدرسة والأسرة."),
         ]
         for i, (title, desc) in enumerate(values):
             SchoolValue.objects.update_or_create(
@@ -839,14 +894,39 @@ class Command(BaseCommand):
             )
 
         site = SiteSettings.get()
-        site.hero_school_name = "مدرسة غَزتنا"
+        site.hero_welcome = "مرحبا بكم في"
+        site.hero_school_name = "مدرسة غَزتنا الخاصة"
         site.hero_tagline = "التعليم الرقمي بمعايير عالمية"
-        site.contact_address = "غزة، فلسطين"
+        site.hero_description = (
+            "من أصالة الانتماء إلى ريادة المستقبل — منصة تعليمية حديثة تجمع بين "
+            "التميز الأكاديمي والتقنية، لبناء جيل واعٍ ومبدع في غزة"
+        )
+        site.hero_cta_primary = "ابدأ رحلتك"
+        site.hero_cta_secondary = "تعرّف علينا"
+        site.about_description = (
+            "مدرسة غَزتنا مؤسسة تعليمية رقمية تهدف إلى تمكين الطلاب من خلال بيئة تعلم "
+            "آمنة، مبتكرة، ومتصلة بالمستقبل."
+        )
+        site.about_vision = (
+            "أن نكون المدرسة الرقمية الرائدة في فلسطين، نُخرّج جيلاً قادراً على المنافسة "
+            "عالمياً مع الحفاظ على الهوية والقيم الوطنية."
+        )
+        site.about_mission = (
+            "توفير تعليم عالي الجودة يجمع بين المناهج الأكاديمية والمهارات الرقمية، "
+            "مع دعم شامل لأولياء الأمور والمجتمع."
+        )
+        site.contact_address = "غزة، فلسطين — حي الرمال"
         site.contact_phone = "+970 599 000 000"
         site.contact_email = "info@ghazatna.edu.ps"
+        site.footer_tagline = "منصة تعليمية رقمية تجمع بين التراث الفلسطيني والتقنية الحديثة."
+        site.reg_show_notes = True
+        site.reg_show_birth_date = True
         site.reg_grade_choices = [{"value": g.name, "label": g.name} for g in grades]
         site.programs_by_grade = {
-            g.name: f"برنامج تعليمي متكامل لـ{g.name} يشمل المواد الأساسية والأنشطة."
+            g.name: (
+                f"برنامج تعليمي متكامل لـ{g.name} يشمل المواد الأساسية، الأنشطة الصفية، "
+                "ومتابعة مستمرة عبر المنصة الرقمية لأولياء الأمور."
+            )
             for g in grades
         }
         site.save()
