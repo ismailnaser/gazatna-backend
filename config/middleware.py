@@ -1,6 +1,87 @@
-from django.http import HttpResponse
+from urllib.parse import urlparse
 
+from django.conf import settings
+from django.http import HttpResponse, JsonResponse
+
+from accounts.auth_cookies import ACCESS_COOKIE, REFRESH_COOKIE
 from config.throttle_cache import bump_counter
+
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+_LOCAL_ORIGINS = (
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+)
+
+
+def _allowed_origins() -> set[str]:
+    origins = {o.rstrip("/") for o in _LOCAL_ORIGINS}
+    origins.update({"https://gzs.edu.ps", "https://www.gzs.edu.ps"})
+    for attr in ("CSRF_TRUSTED_ORIGINS", "CORS_ALLOWED_ORIGINS"):
+        for raw in getattr(settings, attr, None) or []:
+            value = str(raw).strip().rstrip("/")
+            if value:
+                origins.add(value)
+    return origins
+
+
+def _request_origin(request) -> str:
+    proto = (
+        (request.META.get("HTTP_X_FORWARDED_PROTO") or "")
+        .split(",")[0]
+        .strip()
+        or ("https" if request.is_secure() else "http")
+    )
+    host = (request.get_host() or "").split(",")[0].strip()
+    if not host:
+        return ""
+    return f"{proto}://{host}".rstrip("/")
+
+
+def _origin_of(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+class CookieAuthOriginMiddleware:
+    """Block cross-site mutating API calls that rely on auth cookies (not Bearer)."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if request.method in _SAFE_METHODS:
+            return self.get_response(request)
+
+        path = request.path_info or ""
+        if not path.startswith("/api"):
+            return self.get_response(request)
+
+        auth = request.META.get("HTTP_AUTHORIZATION") or ""
+        if auth.lower().startswith("bearer "):
+            return self.get_response(request)
+
+        if ACCESS_COOKIE not in request.COOKIES and REFRESH_COOKIE not in request.COOKIES:
+            return self.get_response(request)
+
+        origin = (request.META.get("HTTP_ORIGIN") or "").rstrip("/")
+        referer = _origin_of(request.META.get("HTTP_REFERER") or "")
+        allowed = _allowed_origins()
+        req_origin = _request_origin(request)
+        if origin and origin == req_origin:
+            return self.get_response(request)
+        if referer and referer == req_origin:
+            return self.get_response(request)
+        if origin in allowed or referer in allowed:
+            return self.get_response(request)
+
+        return JsonResponse(
+            {"detail": "تعذر التحقق من مصدر الطلب."},
+            status=403,
+        )
 
 
 class ApiTrailingSlashMiddleware:

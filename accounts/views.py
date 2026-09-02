@@ -4,10 +4,18 @@ from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.exceptions import ValidationError
 from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenRefreshView
 
+from accounts.auth_cookies import (
+    REFRESH_COOKIE,
+    clear_auth_cookies,
+    remember_from_request,
+    set_auth_cookies,
+)
 from accounts.models import User
 from accounts.roles import ADMIN_ROLES
 from accounts.serializers import UserCreateSerializer, UserSerializer
@@ -32,6 +40,7 @@ class LoginView(APIView):
     def post(self, request):
         username = str(request.data.get("username", "")).strip()
         password = request.data.get("password", "")
+        remember = remember_from_request(request)
 
         if not username:
             return Response({"detail": "بيانات الدخول غير صحيحة"}, status=status.HTTP_401_UNAUTHORIZED)
@@ -43,13 +52,17 @@ class LoginView(APIView):
             return Response({"detail": "بيانات الدخول غير صحيحة"}, status=status.HTTP_401_UNAUTHORIZED)
 
         refresh = RefreshToken.for_user(auth_user)
-        return Response(
+        access = str(refresh.access_token)
+        refresh_str = str(refresh)
+        response = Response(
             {
                 "user": UserSerializer(auth_user).data,
-                "access": str(refresh.access_token),
-                "refresh": str(refresh),
+                "access": access,
+                "refresh": refresh_str,
             }
         )
+        set_auth_cookies(response, request, access, refresh_str, remember=remember)
+        return response
 
 
 class MeView(APIView):
@@ -64,25 +77,26 @@ class MeView(APIView):
 class LogoutView(APIView):
     """Blacklist the refresh token so deactivated/logged-out sessions stop renewing."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def post(self, request):
-        raw = request.data.get("refresh") or ""
-        if not raw:
-            return Response({"detail": "رمز التحديث مطلوب"}, status=status.HTTP_400_BAD_REQUEST)
-        try:
-            token = RefreshToken(raw)
-            token.blacklist()
-        except TokenError:
-            return Response({"detail": "رمز التحديث غير صالح"}, status=status.HTTP_400_BAD_REQUEST)
-        return Response({"detail": "تم تسجيل الخروج"}, status=status.HTTP_200_OK)
+        raw = request.data.get("refresh") or request.COOKIES.get(REFRESH_COOKIE) or ""
+        if raw:
+            try:
+                token = RefreshToken(raw)
+                token.blacklist()
+            except TokenError:
+                pass
+        response = Response({"detail": "تم تسجيل الخروج"}, status=status.HTTP_200_OK)
+        clear_auth_cookies(response, request)
+        return response
 
 
 class StatusAwareTokenRefreshView(TokenRefreshView):
     """Reject refresh for users with status != active before minting new tokens."""
 
     def post(self, request, *args, **kwargs):
-        raw = request.data.get("refresh")
+        raw = request.data.get("refresh") or request.COOKIES.get(REFRESH_COOKIE)
         if not raw:
             return Response({"detail": "رمز التحديث مطلوب"}, status=status.HTTP_400_BAD_REQUEST)
         try:
@@ -93,10 +107,30 @@ class StatusAwareTokenRefreshView(TokenRefreshView):
                     token.blacklist()
                 except TokenError:
                     pass
-                return Response({"detail": "الحساب غير نشط"}, status=status.HTTP_401_UNAUTHORIZED)
+                response = Response({"detail": "الحساب غير نشط"}, status=status.HTTP_401_UNAUTHORIZED)
+                clear_auth_cookies(response, request)
+                return response
         except TokenError:
-            return Response({"detail": "رمز التحديث غير صالح"}, status=status.HTTP_401_UNAUTHORIZED)
-        return super().post(request, *args, **kwargs)
+            response = Response({"detail": "رمز التحديث غير صالح"}, status=status.HTTP_401_UNAUTHORIZED)
+            clear_auth_cookies(response, request)
+            return response
+
+        serializer = TokenRefreshSerializer(data={"refresh": raw}, context={"request": request})
+        try:
+            serializer.is_valid(raise_exception=True)
+        except ValidationError:
+            response = Response({"detail": "رمز التحديث غير صالح"}, status=status.HTTP_401_UNAUTHORIZED)
+            clear_auth_cookies(response, request)
+            return response
+
+        data = serializer.validated_data
+        access = data.get("access")
+        new_refresh = data.get("refresh") or raw
+        remember = remember_from_request(request)
+        response = Response(data)
+        if access and new_refresh:
+            set_auth_cookies(response, request, access, new_refresh, remember=remember)
+        return response
 
 
 class AdminUserViewSet(viewsets.ModelViewSet):

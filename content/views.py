@@ -352,6 +352,27 @@ class AdminSiteSettingsView(APIView):
         return {}
 
     def patch(self, request):
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+
+        try:
+            return self._patch_site_settings(request)
+        except DRFValidationError as exc:
+            detail = exc.detail
+            if isinstance(detail, dict):
+                first = next(iter(detail.values()), None)
+                message = first[0] if isinstance(first, list) and first else str(detail)
+            elif isinstance(detail, list) and detail:
+                message = str(detail[0])
+            else:
+                message = str(detail)
+            return Response({"detail": message}, status=status.HTTP_400_BAD_REQUEST)
+        except OSError:
+            return Response(
+                {"detail": "تعذر حفظ الملف على الخادم. تحقق من صلاحيات مجلد media أو تواصل مع الدعم."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    def _patch_site_settings(self, request):
         s = SiteSettings.get()
         is_multipart = request.content_type and "multipart" in request.content_type
         data = request.data
@@ -450,7 +471,6 @@ class AdminSiteSettingsView(APIView):
 
         s.save()
         return Response(PublicSiteSettingsView()._serialize(s, request))
-
 
 
 class PublicAdmissionApplicationView(APIView):

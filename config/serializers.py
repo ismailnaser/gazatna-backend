@@ -33,12 +33,14 @@ class SchoolClassSerializer(serializers.ModelSerializer):
     studentCount = serializers.IntegerField(source="student_count", read_only=True)
     homeroomTeacherId = serializers.SerializerMethodField()
     homeroomTeacherName = serializers.SerializerMethodField()
+    gradeId = serializers.SerializerMethodField()
 
     class Meta:
         model = SchoolClass
         fields = [
             "id",
             "name",
+            "gradeId",
             "gradeLevel",
             "section",
             "studentCount",
@@ -51,6 +53,18 @@ class SchoolClassSerializer(serializers.ModelSerializer):
 
     def get_homeroomTeacherName(self, obj):
         return obj.homeroom_teacher.name if obj.homeroom_teacher_id else None
+
+    def get_gradeId(self, obj):
+        names = self.context.get("_grade_ids_by_name")
+        if names is None:
+            names = {}
+            for grade in Grade.objects.only("id", "name"):
+                grade_id = str(grade.id)
+                names[grade.name] = grade_id
+                names[(grade.name or "").strip()] = grade_id
+            self.context["_grade_ids_by_name"] = names
+        key = (obj.grade_level or "").strip()
+        return names.get(key) or names.get(obj.grade_level)
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -109,13 +123,15 @@ class GradeSerializer(serializers.ModelSerializer):
 
         data = super().to_representation(instance)
         data["id"] = str(data["id"])
-        policy = getattr(instance, "promotion_policy", None)
-        if policy is None:
-            try:
-                policy = instance.promotion_policy
-            except Exception:
-                policy = None
-        data["promotionPolicy"] = serialize_promotion_policy(policy) if policy else None
+        policy = None
+        try:
+            policy = instance.promotion_policy
+        except Exception:
+            policy = None
+        try:
+            data["promotionPolicy"] = serialize_promotion_policy(policy) if policy else None
+        except Exception:
+            data["promotionPolicy"] = None
         return data
 
 

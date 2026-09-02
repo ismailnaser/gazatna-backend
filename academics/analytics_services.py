@@ -132,8 +132,7 @@ def _growth_percent(current: int, previous: int) -> float | None:
     return round(((current - previous) / previous) * 100, 1)
 
 
-@file_cache.cached(timeout=120)
-def _student_enrollment_analytics(grade_level: str = "") -> dict:
+def _student_enrollment_analytics_impl(grade_level: str = "") -> dict:
     """Enrollment KPIs for the active academic year vs the previous year."""
     year = get_active_academic_year()
     previous_year = None
@@ -195,8 +194,16 @@ def _student_enrollment_analytics(grade_level: str = "") -> dict:
     }
 
 
+@file_cache.cached(timeout=120)
+def _student_enrollment_analytics(grade_level: str = "") -> dict:
+    return _student_enrollment_analytics_impl(grade_level)
+
+
 def student_enrollment_analytics(grade_level: str = "") -> dict:
-    return _student_enrollment_analytics(grade_level or "")
+    try:
+        return _student_enrollment_analytics(grade_level or "")
+    except Exception:
+        return _student_enrollment_analytics_impl(grade_level or "")
 
 
 def invalidate_cached_average_grade() -> None:

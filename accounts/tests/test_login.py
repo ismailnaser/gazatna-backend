@@ -84,3 +84,43 @@ class LoginApiTests(APITestCase):
         res = self.client.get("/api/auth/me/")
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data["username"], "parent_one")
+
+    def test_login_sets_httponly_cookies(self):
+        res = self.client.post(
+            "/api/auth/login/",
+            {"username": "parent_one", "password": self.password},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.cookies["ghazatna_access"]["httponly"])
+        self.assertTrue(res.cookies["ghazatna_refresh"]["httponly"])
+        self.assertFalse(res.cookies["ghazatna_present"]["httponly"])
+
+    def test_me_accepts_access_cookie_without_bearer(self):
+        self.client.post(
+            "/api/auth/login/",
+            {"username": "parent_one", "password": self.password},
+            format="json",
+        )
+        self.client.credentials()
+        res = self.client.get("/api/auth/me/")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["username"], "parent_one")
+
+    def test_logout_clears_auth_cookies(self):
+        self.client.post(
+            "/api/auth/login/",
+            {"username": "parent_one", "password": self.password},
+            format="json",
+        )
+        self.client.credentials()
+        res = self.client.post(
+            "/api/auth/logout/",
+            {},
+            format="json",
+            HTTP_ORIGIN="http://localhost:3001",
+        )
+        self.assertEqual(res.status_code, 200)
+        self.client.cookies.clear()
+        res = self.client.get("/api/auth/me/")
+        self.assertEqual(res.status_code, 401)
