@@ -88,10 +88,13 @@ def build_media_url(request, file_field) -> str | None:
     if not file_field:
         return None
     relative = file_field.url
-    absolute = request.build_absolute_uri(relative) if request else relative
+    if relative and not relative.startswith("/"):
+        relative = f"/{relative}"
     path = media_path_from_url(relative)
     if is_public_media_path(path):
-        return absolute
+        # Same-origin /media/... — Next proxies to Django (avoids wrong absolute hosts after deploy).
+        return relative
+    absolute = request.build_absolute_uri(relative) if request else relative
     return append_media_signature(absolute)
 
 

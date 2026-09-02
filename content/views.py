@@ -77,6 +77,7 @@ from config.permissions import (
     IsTeacher,
 )
 from config.cache_mixins import CachedAPIViewMixin, CachedReadOnlyViewSetMixin
+from config.cache_utils import invalidate_prefix
 from config.events import emit
 from config.serializers import (
     ClassGradebookSerializer,
@@ -565,6 +566,7 @@ class AdminSiteSettingsView(APIView):
             s.programs_by_grade = next_map
 
         s.save()
+        invalidate_prefix("public:site")
         return Response(PublicSiteSettingsView()._serialize(s, request))
 
 
