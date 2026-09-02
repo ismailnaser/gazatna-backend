@@ -1,3 +1,4 @@
+import re
 from urllib.parse import urlparse
 
 from django.conf import settings
@@ -13,6 +14,7 @@ _LOCAL_ORIGINS = (
     "http://127.0.0.1:3000",
     "http://127.0.0.1:3001",
 )
+_PRIVATE_LAN_ORIGIN = re.compile(r"^https?://(?:\d{1,3}\.){3}\d{1,3}(:\d+)?$", re.I)
 
 
 def _allowed_origins() -> set[str]:
@@ -46,6 +48,17 @@ def _origin_of(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def _forwarded_frontend_origin(request) -> str:
+    """Public host the browser used (Next.js sets X-Forwarded-Host)."""
+    forwarded = (request.META.get("HTTP_X_FORWARDED_HOST") or "").split(",")[0].strip()
+    if not forwarded:
+        return ""
+    proto = (request.META.get("HTTP_X_FORWARDED_PROTO") or "").split(",")[0].strip().lower()
+    if not proto:
+        proto = "https" if request.is_secure() else "http"
+    return f"{proto}://{forwarded}".rstrip("/")
+
+
 class CookieAuthOriginMiddleware:
     """Block cross-site mutating API calls that rely on auth cookies (not Bearer)."""
 
@@ -67,16 +80,28 @@ class CookieAuthOriginMiddleware:
         if ACCESS_COOKIE not in request.COOKIES and REFRESH_COOKIE not in request.COOKIES:
             return self.get_response(request)
 
+        sec_fetch_site = (request.META.get("HTTP_SEC_FETCH_SITE") or "").lower()
+        if sec_fetch_site in ("same-origin", "same-site"):
+            return self.get_response(request)
+
         origin = (request.META.get("HTTP_ORIGIN") or "").rstrip("/")
         referer = _origin_of(request.META.get("HTTP_REFERER") or "")
         allowed = _allowed_origins()
         req_origin = _request_origin(request)
+        frontend_origin = _forwarded_frontend_origin(request)
+        if frontend_origin and (origin == frontend_origin or referer == frontend_origin):
+            return self.get_response(request)
         if origin and origin == req_origin:
             return self.get_response(request)
         if referer and referer == req_origin:
             return self.get_response(request)
         if origin in allowed or referer in allowed:
             return self.get_response(request)
+        if settings.DEBUG:
+            if origin and _PRIVATE_LAN_ORIGIN.match(origin):
+                return self.get_response(request)
+            if referer and _PRIVATE_LAN_ORIGIN.match(referer):
+                return self.get_response(request)
 
         return JsonResponse(
             {"detail": "تعذر التحقق من مصدر الطلب."},

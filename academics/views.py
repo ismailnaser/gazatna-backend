@@ -4,7 +4,7 @@ import re
 import uuid
 
 from django.db import DatabaseError, transaction
-from django.db.models import Avg, Count, Max, Prefetch, Sum
+from django.db.models import Count, Max, Prefetch, Q, Sum
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from rest_framework import serializers, status, viewsets
@@ -256,7 +256,13 @@ class AdminStudentViewSet(viewsets.ModelViewSet):
 
 class AdminClassViewSet(viewsets.ModelViewSet):
     permission_classes = [AdminClassPermission]
-    queryset = SchoolClass.objects.all()
+
+    def get_queryset(self):
+        return (
+            SchoolClass.objects.select_related("homeroom_teacher")
+            .annotate(active_student_count=Count("students", filter=Q(students__is_active=True)))
+            .order_by("grade_level", "section", "id")
+        )
 
     def get_serializer_class(self):
         if self.action in ("create", "update", "partial_update"):
@@ -298,7 +304,12 @@ class AdminClassViewSet(viewsets.ModelViewSet):
                 school_class.homeroom_teacher = teacher
                 school_class.save(update_fields=["homeroom_teacher"])
 
-        students = Student.objects.filter(school_class=school_class, is_active=True).order_by("name")
+        students = (
+            Student.objects.filter(school_class=school_class, is_active=True)
+            .select_related("school_class", "fee_balance", "parent")
+            .prefetch_related("uploaded_documents")
+            .order_by("name")
+        )
         return Response(
             {
                 "class": SchoolClassSerializer(school_class, context={"request": request}).data,
@@ -325,7 +336,7 @@ class AdminGradeViewSet(viewsets.ModelViewSet):
         try:
             return super().list(request, *args, **kwargs)
         except DatabaseError:
-            queryset = Grade.objects.order_by("sort_order", "id")
+            queryset = Grade.objects.select_related("promotion_policy").order_by("sort_order", "id")
             return Response(GradeSerializer(queryset, many=True).data)
 
     def perform_create(self, serializer):
@@ -394,7 +405,13 @@ class AdminGradeViewSet(viewsets.ModelViewSet):
 
 class AdminSubjectViewSet(viewsets.ModelViewSet):
     permission_classes = [AdminScopePermission("academics")]
-    queryset = Subject.objects.prefetch_related("class_assignments").all()
+
+    def get_queryset(self):
+        return (
+            Subject.objects.prefetch_related("class_assignments")
+            .annotate(teacher_count=Count("teachers", distinct=True))
+            .order_by("name")
+        )
 
     def get_serializer_class(self):
         if self.action in ("create", "update", "partial_update"):

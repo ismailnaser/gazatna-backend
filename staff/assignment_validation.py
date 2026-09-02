@@ -1,6 +1,7 @@
 from itertools import product
 
 from django.db import transaction
+from django.db.models import Count, Q
 
 from rest_framework import serializers
 
@@ -31,7 +32,12 @@ def teacher_school_classes(teacher):
     class_ids = teacher_teaching_class_ids(teacher)
     if not class_ids:
         return SchoolClass.objects.none()
-    return SchoolClass.objects.filter(id__in=class_ids).order_by("grade_level", "section", "id")
+    return (
+        SchoolClass.objects.filter(id__in=class_ids)
+        .select_related("homeroom_teacher")
+        .annotate(active_student_count=Count("students", filter=Q(students__is_active=True)))
+        .order_by("grade_level", "section", "id")
+    )
 
 
 def subjects_for_school_class(school_class_id):

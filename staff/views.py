@@ -261,7 +261,12 @@ class TeacherProfileView(APIView):
     permission_classes = [IsTeacher]
 
     def get(self, request):
-        teacher = _teacher_for_user(request.user)
+        teacher = (
+            TeacherProfile.objects.filter(user=request.user)
+            .select_related("staff_type", "user")
+            .prefetch_related("teaching_subjects", "class_assignments", "homeroom_classes")
+            .first()
+        )
         if not teacher:
             return Response(
                 {"detail": "لم يتم ربط حسابك بملف معلم"},

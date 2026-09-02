@@ -30,7 +30,7 @@ from accounts.utils import create_auto_user, next_numeric_username
 
 class SchoolClassSerializer(serializers.ModelSerializer):
     gradeLevel = serializers.CharField(source="grade_level", read_only=True)
-    studentCount = serializers.IntegerField(source="student_count", read_only=True)
+    studentCount = serializers.SerializerMethodField()
     homeroomTeacherId = serializers.SerializerMethodField()
     homeroomTeacherName = serializers.SerializerMethodField()
     gradeId = serializers.SerializerMethodField()
@@ -50,6 +50,12 @@ class SchoolClassSerializer(serializers.ModelSerializer):
 
     def get_homeroomTeacherId(self, obj):
         return str(obj.homeroom_teacher_id) if obj.homeroom_teacher_id else None
+
+    def get_studentCount(self, obj):
+        annotated = getattr(obj, "active_student_count", None)
+        if annotated is not None:
+            return annotated
+        return obj.student_count
 
     def get_homeroomTeacherName(self, obj):
         return obj.homeroom_teacher.name if obj.homeroom_teacher_id else None
@@ -144,6 +150,9 @@ class SubjectSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "teacherCount", "classIds"]
 
     def get_teacherCount(self, obj):
+        annotated = getattr(obj, "teacher_count", None)
+        if annotated is not None:
+            return annotated
         return obj.teachers.count()
 
     def get_classIds(self, obj):

@@ -217,7 +217,14 @@ def _teacher_school_class_or_response(teacher, class_id):
 def _linked_student_for_parent(user):
     return (
         Student.objects.filter(parent=user)
-        .select_related("school_class", "fee_balance")
+        .select_related("school_class", "fee_balance", "parent")
+        .prefetch_related(
+            "uploaded_documents",
+            Prefetch(
+                "payment_notices",
+                queryset=PaymentNotice.objects.order_by("-date", "-id"),
+            ),
+        )
         .order_by("-is_active", "id")
         .first()
     )

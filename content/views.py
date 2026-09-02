@@ -469,6 +469,17 @@ class AdminSiteSettingsView(APIView):
         is_multipart = request.content_type and "multipart" in request.content_type
         data = request.data
 
+        if not is_multipart:
+            has_payload = bool(data) and any(
+                key in data
+                for key in ("hero", "about", "contact", "registration", "programs", "removeHeroImage")
+            )
+            if not has_payload and not request.FILES.get("heroImage"):
+                return Response(
+                    {"detail": "لم يُستلم أي محتوى للحفظ. حدّث الصفحة وحاول مرة أخرى."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         hero_image = request.FILES.get("heroImage")
         if hero_image:
             from assignments.attachment_utils import validate_uploaded_file

@@ -1536,6 +1536,7 @@ class ParentHomeworkBySubjectView(APIView):
         homework = _scope_operational_term(
             Homework.objects.filter(school_class_id=child.school_class_id)
             .select_related("teacher", "school_class")
+            .prefetch_related("attachment_files")
             .order_by("subject", "-created_at")
         )
         grouped: dict[str, dict] = {}

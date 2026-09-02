@@ -361,7 +361,7 @@ class ParentFeesView(APIView):
         child = _linked_student_for_parent(request.user)
         if not child:
             return Response({"student": None, "notices": [], "feeStatus": None})
-        notices = PaymentNotice.objects.filter(student=child).order_by("-date", "-id")
+        notices = PaymentNotice.objects.filter(student=child).select_related("student").order_by("-date", "-id")
         return Response({
             "student": StudentSerializer(child, context={"request": request}).data,
             "notices": PaymentNoticeSerializer(notices, many=True, context={"request": request}).data,
