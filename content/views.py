@@ -371,6 +371,53 @@ class AdminSiteSettingsView(APIView):
                 {"detail": "تعذر حفظ الملف على الخادم. تحقق من صلاحيات مجلد media أو تواصل مع الدعم."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+        except Exception:
+            return Response(
+                {"detail": "تعذر معالجة صورة الصفحة الرئيسية. جرّب صورة JPG أو PNG أصغر حجماً."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    def _optimize_hero_image(self, uploaded):
+        """Downscale large hero photos so Passenger workers do not OOM on shared hosting."""
+        from io import BytesIO
+
+        from django.core.files.uploadedfile import InMemoryUploadedFile
+        from PIL import Image, UnidentifiedImageError
+
+        try:
+            uploaded.seek(0)
+        except Exception:
+            pass
+
+        try:
+            with Image.open(uploaded) as im:
+                im = im.convert("RGB")
+                max_edge = 1920
+                w, h = im.size
+                if max(w, h) > max_edge:
+                    scale = max_edge / float(max(w, h))
+                    im = im.resize(
+                        (max(1, int(w * scale)), max(1, int(h * scale))),
+                        Image.Resampling.LANCZOS,
+                    )
+                buf = BytesIO()
+                im.save(buf, format="JPEG", quality=85, optimize=True)
+                buf.seek(0)
+        except UnidentifiedImageError as exc:
+            from rest_framework.exceptions import ValidationError as DRFValidationError
+
+            raise DRFValidationError("تعذر قراءة الصورة. استخدم ملف JPG أو PNG صالح.") from exc
+
+        base = (getattr(uploaded, "name", "") or "hero").rsplit(".", 1)[0] or "hero"
+        name = f"{base}.jpg"
+        return InMemoryUploadedFile(
+            buf,
+            field_name="heroImage",
+            name=name,
+            content_type="image/jpeg",
+            size=buf.getbuffer().nbytes,
+            charset=None,
+        )
 
     def _patch_site_settings(self, request):
         s = SiteSettings.get()
@@ -382,6 +429,7 @@ class AdminSiteSettingsView(APIView):
             from assignments.attachment_utils import validate_uploaded_file
 
             validate_uploaded_file(hero_image)
+            hero_image = self._optimize_hero_image(hero_image)
             if s.hero_image:
                 s.hero_image.delete(save=False)
             s.hero_image = hero_image
