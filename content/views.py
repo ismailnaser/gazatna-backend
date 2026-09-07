@@ -144,6 +144,7 @@ from staff.assignment_validation import (
 
 from config.api_helpers import *  # noqa: F401,F403
 
+
 class PublicNewsViewSet(CachedReadOnlyViewSetMixin, viewsets.ReadOnlyModelViewSet):
     permission_classes = [AllowAny]
     serializer_class = NewsItemSerializer
@@ -262,13 +263,18 @@ class AdminNewsViewSet(viewsets.ModelViewSet):
         self._handle_gallery_images(item, self.request)
         if item.featured:
             self._clear_other_featured(item)
+        invalidate_prefix("public:news")
 
     def perform_update(self, serializer):
         item = serializer.save()
         self._handle_gallery_images(item, self.request)
         if item.featured:
             self._clear_other_featured(item)
+        invalidate_prefix("public:news")
 
+    def perform_destroy(self, instance):
+        super().perform_destroy(instance)
+        invalidate_prefix("public:news")
 
 
 class PublicSiteSettingsView(CachedAPIViewMixin, APIView):
