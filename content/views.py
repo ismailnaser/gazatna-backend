@@ -195,15 +195,22 @@ class AdminNewsViewSet(viewsets.ModelViewSet):
         NewsItem.objects.exclude(pk=item.pk).filter(featured=True).update(featured=False)
 
     def _sync_legacy_cover(self, item):
-        cover = item.images.filter(is_cover=True).first() or item.images.order_by("order", "id").first()
-        if cover and cover.file:
-            item.image = cover.file
-            item.save(update_fields=["image"])
-        elif not item.images.exists():
+        """
+        Gallery (NewsImage) is the source of truth.
+        Do NOT assign cover.file onto item.image — re-saving/moving the same
+        FileField crashes on some Passenger/shared-hosting setups (HTTP 500).
+        Public serializers already prefer gallery URLs.
+        """
+        if item.images.exists():
+            return
+        if item.image:
             item.image = None
             item.save(update_fields=["image"])
 
     def _handle_gallery_images(self, item, request):
+        from assignments.attachment_utils import validate_uploaded_file
+        from config.image_upload import prepare_image_upload
+
         delete_ids = request.data.getlist("deleteImageIds") if hasattr(request.data, "getlist") else []
         for image_id in delete_ids:
             img = item.images.filter(id=image_id).first()
@@ -213,7 +220,21 @@ class AdminNewsViewSet(viewsets.ModelViewSet):
                 img.file.delete(save=False)
             img.delete()
 
-        files = request.FILES.getlist("galleryImages") if hasattr(request.FILES, "getlist") else []
+        raw_files = request.FILES.getlist("galleryImages") if hasattr(request.FILES, "getlist") else []
+        files = []
+        for uploaded in raw_files:
+            validate_uploaded_file(uploaded)
+            files.append(
+                prepare_image_upload(
+                    uploaded,
+                    field_name="galleryImages",
+                    default_stem="news",
+                    max_edge=1600,
+                    reencode_over_bytes=500_000,
+                    jpeg_quality=82,
+                )
+            )
+
         new_image_ids = []
         base_order = item.images.count()
         for index, uploaded in enumerate(files):
@@ -247,6 +268,15 @@ class AdminNewsViewSet(viewsets.ModelViewSet):
 
         legacy_image = request.FILES.get("image")
         if legacy_image and not files:
+            validate_uploaded_file(legacy_image)
+            legacy_image = prepare_image_upload(
+                legacy_image,
+                field_name="image",
+                default_stem="news",
+                max_edge=1600,
+                reencode_over_bytes=500_000,
+                jpeg_quality=82,
+            )
             if item.images.filter(is_cover=True).exists():
                 item.images.filter(is_cover=True).update(is_cover=False)
             NewsImage.objects.create(
@@ -257,6 +287,54 @@ class AdminNewsViewSet(viewsets.ModelViewSet):
             )
 
         self._sync_legacy_cover(item)
+
+    def create(self, request, *args, **kwargs):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+        import logging
+
+        try:
+            return super().create(request, *args, **kwargs)
+        except DRFValidationError:
+            raise
+        except DjangoValidationError as exc:
+            return Response({"detail": str(exc.message if hasattr(exc, "message") else exc)}, status=400)
+        except OSError:
+            logging.getLogger(__name__).exception("AdminNews create OSError")
+            return Response(
+                {"detail": "تعذر حفظ صور الخبر على الخادم. تحقق من مجلد media أو صغّر الصور وحاول مجدداً."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("AdminNews create failed")
+            return Response(
+                {"detail": "تعذر نشر الخبر. إذا أضفت عدة صور، حاول مرة أخرى أو ارفعها صورة صورة."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    def update(self, request, *args, **kwargs):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+        import logging
+
+        try:
+            return super().update(request, *args, **kwargs)
+        except DRFValidationError:
+            raise
+        except DjangoValidationError as exc:
+            return Response({"detail": str(exc.message if hasattr(exc, "message") else exc)}, status=400)
+        except OSError:
+            logging.getLogger(__name__).exception("AdminNews update OSError")
+            return Response(
+                {"detail": "تعذر حفظ صور الخبر على الخادم. تحقق من مجلد media أو صغّر الصور وحاول مجدداً."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("AdminNews update failed")
+            return Response(
+                {"detail": "تعذر تحديث الخبر. حاول رفع الصور واحدة واحدة إذا استمرت المشكلة."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
     def perform_create(self, serializer):
         item = serializer.save()
