@@ -363,35 +363,9 @@ def _subject_material_q(subject_label):
 
 
 def _sync_grade_sections(grade: Grade):
-    desired = int(grade.sections_count or 0)
-    desired = max(1, min(desired, len(SECTION_LABELS)))
-    grade.sections_count = desired
-    grade.save(update_fields=["sections_count"])
+    from academics.services import sync_grade_sections
 
-    existing = list(SchoolClass.objects.filter(grade_level=grade.name).order_by("id"))
-    existing_by_section = {c.section: c for c in existing if c.section}
-
-    desired_sections = SECTION_LABELS[:desired]
-
-    # Create missing sections
-    for sec in desired_sections:
-        if sec in existing_by_section:
-            cls = existing_by_section[sec]
-            expected_name = f"{grade.name} - {sec}"
-            if cls.name != expected_name:
-                cls.name = expected_name
-                cls.save(update_fields=["name"])
-        else:
-            SchoolClass.objects.create(
-                grade_level=grade.name,
-                section=sec,
-                name=f"{grade.name} - {sec}",
-            )
-
-    # Remove extra sections (students are unlinked via SET_NULL on school_class)
-    for cls in existing:
-        if cls.section and cls.section not in desired_sections:
-            cls.delete()
+    sync_grade_sections(grade)
 
 
 
