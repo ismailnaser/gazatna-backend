@@ -22,7 +22,7 @@ class Grade(models.Model):
 class SchoolClass(models.Model):
     name = models.CharField(max_length=100)
     grade_level = models.CharField(max_length=50, blank=True)
-    section = models.CharField(max_length=10, blank=True)
+    section = models.CharField(max_length=40, blank=True)
     homeroom_teacher = models.ForeignKey(
         "staff.TeacherProfile",
         on_delete=models.SET_NULL,
@@ -99,7 +99,7 @@ class Student(models.Model):
         blank=True, default="", verbose_name="تقييم الطالب"
     )
     grade_level = models.CharField(max_length=50)
-    section = models.CharField(max_length=10)
+    section = models.CharField(max_length=40)
     school_class = models.ForeignKey(
         SchoolClass,
         on_delete=models.SET_NULL,

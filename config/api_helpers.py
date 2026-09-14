@@ -394,9 +394,13 @@ def _schedule_entry_text(value, default=""):
 
 
 def _school_class_label(school_class):
+    if getattr(school_class, "name", None):
+        return school_class.name
     section = school_class.section or ""
-    label = f"{school_class.grade_level} - {section}".strip(" -")
-    return label or school_class.name
+    grade_level = school_class.grade_level or ""
+    if grade_level and section:
+        return f"{grade_level} ({section})"
+    return grade_level or section
 
 
 

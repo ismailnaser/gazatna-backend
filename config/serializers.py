@@ -95,7 +95,7 @@ class SchoolClassWriteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"section": "الشعبة مطلوبة"})
         attrs["grade_level"] = grade
         attrs["section"] = section
-        attrs["name"] = attrs.get("name") or f"{grade} - {section}"
+        attrs["name"] = attrs.get("name") or f"{grade} ({section})"
         qs = SchoolClass.objects.filter(grade_level=grade, section=section)
         if self.instance:
             qs = qs.exclude(pk=self.instance.pk)
@@ -112,10 +112,15 @@ class SchoolClassWriteSerializer(serializers.ModelSerializer):
 class GradeSerializer(serializers.ModelSerializer):
     sectionsCount = serializers.IntegerField(source="sections_count")
     sortOrder = serializers.IntegerField(source="sort_order", read_only=True)
+    sectionNames = serializers.ListField(
+        child=serializers.CharField(max_length=40, allow_blank=False),
+        required=False,
+        write_only=True,
+    )
 
     class Meta:
         model = Grade
-        fields = ["id", "name", "sectionsCount", "sortOrder"]
+        fields = ["id", "name", "sectionsCount", "sortOrder", "sectionNames"]
 
     def validate_sectionsCount(self, value):
         if value < 1:
@@ -123,6 +128,19 @@ class GradeSerializer(serializers.ModelSerializer):
         if value > 20:
             raise serializers.ValidationError("عدد الشعب كبير جداً")
         return value
+
+    def validate(self, attrs):
+        from academics.services import SectionSyncError, normalize_section_names
+
+        names = attrs.get("sectionNames")
+        if names is None:
+            return attrs
+        try:
+            attrs["sectionNames"] = normalize_section_names(names)
+        except SectionSyncError as exc:
+            raise serializers.ValidationError({"sectionNames": str(exc)}) from exc
+        attrs["sections_count"] = len(attrs["sectionNames"])
+        return attrs
 
     def to_representation(self, instance):
         from academics.academic_services import serialize_promotion_policy

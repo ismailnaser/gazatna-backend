@@ -284,25 +284,54 @@ class AdminClassViewSet(viewsets.ModelViewSet):
         school_class = self.get_object()
 
         if request.method == "PATCH":
-            teacher_id = request.data.get("homeroomTeacherId")
-            if teacher_id in ("", None):
-                school_class.homeroom_teacher = None
-                school_class.save(update_fields=["homeroom_teacher"])
-            else:
-                teacher = TeacherProfile.objects.filter(id=teacher_id).first()
-                if not teacher:
-                    return Response({"detail": "المعلم غير موجود"}, status=status.HTTP_400_BAD_REQUEST)
+            if "section" in request.data:
+                from academics.services import (
+                    SectionSyncError,
+                    format_section_display,
+                    normalize_section_names,
+                )
+
                 try:
-                    validate_homeroom_teacher(teacher, school_class)
-                except ValidationError as exc:
-                    detail = exc.detail
-                    if isinstance(detail, dict):
-                        message = detail.get("detail", detail)
-                    else:
-                        message = detail
-                    return Response({"detail": message}, status=status.HTTP_400_BAD_REQUEST)
-                school_class.homeroom_teacher = teacher
-                school_class.save(update_fields=["homeroom_teacher"])
+                    label = normalize_section_names([request.data.get("section")])[0]
+                except SectionSyncError as exc:
+                    return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+                if SchoolClass.objects.filter(
+                    grade_level=school_class.grade_level, section=label
+                ).exclude(pk=school_class.pk).exists():
+                    return Response(
+                        {"detail": f"الشعبة {label} موجودة مسبقاً في {school_class.grade_level}"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                old_section = school_class.section
+                school_class.section = label
+                school_class.name = format_section_display(school_class.grade_level, label)
+                school_class.save(update_fields=["section", "name"])
+                if old_section and old_section != label:
+                    Student.objects.filter(school_class=school_class).update(section=label)
+                    Student.objects.filter(
+                        grade_level=school_class.grade_level, section=old_section
+                    ).exclude(school_class_id=school_class.id).update(section=label)
+
+            if "homeroomTeacherId" in request.data:
+                teacher_id = request.data.get("homeroomTeacherId")
+                if teacher_id in ("", None):
+                    school_class.homeroom_teacher = None
+                    school_class.save(update_fields=["homeroom_teacher"])
+                else:
+                    teacher = TeacherProfile.objects.filter(id=teacher_id).first()
+                    if not teacher:
+                        return Response({"detail": "المعلم غير موجود"}, status=status.HTTP_400_BAD_REQUEST)
+                    try:
+                        validate_homeroom_teacher(teacher, school_class)
+                    except ValidationError as exc:
+                        detail = exc.detail
+                        if isinstance(detail, dict):
+                            message = detail.get("detail", detail)
+                        else:
+                            message = detail
+                        return Response({"detail": message}, status=status.HTTP_400_BAD_REQUEST)
+                    school_class.homeroom_teacher = teacher
+                    school_class.save(update_fields=["homeroom_teacher"])
 
         students = (
             Student.objects.filter(school_class=school_class, is_active=True)
@@ -341,15 +370,20 @@ class AdminGradeViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         from academics.academic_services import get_promotion_policy_for_grade
+        from academics.services import sync_grade_sections
 
+        section_names = serializer.validated_data.pop("sectionNames", None)
         max_order = Grade.objects.aggregate(Max("sort_order"))["sort_order__max"] or 0
         grade = serializer.save(sort_order=max_order + 1)
-        _sync_grade_sections(grade)
+        sync_grade_sections(grade, section_names)
         get_promotion_policy_for_grade(grade)
 
     def perform_update(self, serializer):
+        from academics.services import sync_grade_sections
+
+        section_names = serializer.validated_data.pop("sectionNames", None)
         grade = serializer.save()
-        _sync_grade_sections(grade)
+        sync_grade_sections(grade, section_names)
 
     @action(detail=True, methods=["patch"], url_path="promotion-policy")
     def update_promotion_policy(self, request, pk=None):

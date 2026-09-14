@@ -3,6 +3,40 @@ from datetime import date
 from academics.models import Grade, SchoolClass, Student
 
 SECTION_LABELS = ["أ", "ب", "ج", "د", "هـ", "و", "ز", "ح", "ط", "ي", "ك", "ل", "م", "ن", "س", "ع", "ف", "ص", "ق", "ر"]
+MAX_SECTIONS = 20
+MAX_SECTION_NAME = 40
+
+
+class SectionSyncError(ValueError):
+    pass
+
+
+def format_section_display(grade_name: str, section: str) -> str:
+    section = (section or "").strip()
+    grade_name = (grade_name or "").strip()
+    if grade_name and section:
+        return f"{grade_name} ({section})"
+    return grade_name or section
+
+
+def normalize_section_names(raw_names) -> list[str]:
+    if not isinstance(raw_names, list):
+        raise SectionSyncError("أسماء الشعب غير صالحة")
+    names = []
+    for item in raw_names:
+        label = " ".join(str(item or "").split())
+        if not label:
+            raise SectionSyncError("اكتب اسماً لكل شعبة")
+        if len(label) > MAX_SECTION_NAME:
+            raise SectionSyncError("اسم الشعبة طويل جداً")
+        names.append(label)
+    if not names:
+        raise SectionSyncError("أضف شعبة واحدة على الأقل")
+    if len(names) > MAX_SECTIONS:
+        raise SectionSyncError("عدد الشعب كبير جداً")
+    if len(set(names)) != len(names):
+        raise SectionSyncError("أسماء الشعب يجب أن تكون مختلفة")
+    return names
 
 
 def get_ordered_grades():
@@ -39,33 +73,62 @@ def promote_student_to_next_grade(student: Student):
     return next_grade
 
 
-def sync_grade_sections(grade: Grade):
+def _apply_section_label(grade: Grade, school_class: SchoolClass, label: str):
+    old_section = school_class.section
+    school_class.section = label
+    school_class.name = format_section_display(grade.name, label)
+    school_class.save(update_fields=["section", "name"])
+    if old_section and old_section != label:
+        Student.objects.filter(school_class=school_class).update(section=label)
+        Student.objects.filter(grade_level=grade.name, section=old_section).exclude(
+            school_class_id=school_class.id
+        ).update(section=label)
+
+
+def sync_grade_sections(grade: Grade, section_names=None):
+    existing = list(SchoolClass.objects.filter(grade_level=grade.name).order_by("id"))
+
+    if section_names is not None:
+        names = normalize_section_names(section_names)
+        grade.sections_count = len(names)
+        grade.save(update_fields=["sections_count"])
+
+        for index, label in enumerate(names):
+            if index < len(existing):
+                _apply_section_label(grade, existing[index], label)
+            else:
+                SchoolClass.objects.create(
+                    grade_level=grade.name,
+                    section=label,
+                    name=format_section_display(grade.name, label),
+                )
+        for school_class in existing[len(names) :]:
+            school_class.delete()
+        return
+
     desired = int(grade.sections_count or 0)
-    desired = max(1, min(desired, len(SECTION_LABELS)))
+    desired = max(1, min(desired, MAX_SECTIONS))
     grade.sections_count = desired
     grade.save(update_fields=["sections_count"])
 
-    existing = list(SchoolClass.objects.filter(grade_level=grade.name).order_by("id"))
-    existing_by_section = {school_class.section: school_class for school_class in existing if school_class.section}
-    desired_sections = SECTION_LABELS[:desired]
+    if len(existing) > desired:
+        for school_class in existing[desired:]:
+            school_class.delete()
+        existing = existing[:desired]
 
-    for section in desired_sections:
-        if section in existing_by_section:
-            school_class = existing_by_section[section]
-            expected_name = f"{grade.name} - {section}"
-            if school_class.name != expected_name:
-                school_class.name = expected_name
-                school_class.save(update_fields=["name"])
-        else:
+    used = {school_class.section for school_class in existing if school_class.section}
+    while len(existing) < desired:
+        label = next((item for item in SECTION_LABELS if item not in used), None)
+        if not label:
+            label = str(len(existing) + 1)
+        used.add(label)
+        existing.append(
             SchoolClass.objects.create(
                 grade_level=grade.name,
-                section=section,
-                name=f"{grade.name} - {section}",
+                section=label,
+                name=format_section_display(grade.name, label),
             )
-
-    for school_class in existing:
-        if school_class.section and school_class.section not in desired_sections:
-            school_class.delete()
+        )
 
 
 def ensure_all_grade_sections():
